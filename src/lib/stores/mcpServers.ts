@@ -9,6 +9,7 @@ import { base } from "$app/paths";
 import { env as publicEnv } from "$env/dynamic/public";
 import { browser } from "$app/environment";
 import type { MCPServer, ServerStatus, MCPTool } from "$lib/types/Tool";
+import { randomUUID } from "$lib/utils/randomUuid";
 
 // Namespace storage by app identity to avoid collisions across apps
 function toKeyPart(s: string | undefined): string {
@@ -77,16 +78,28 @@ function saveSelectedIds(ids: Set<string>) {
 	}
 }
 
-// Load disabled base server IDs from localStorage (empty set if missing or on error)
+// 默认关闭的 base server 名单，逗号分隔的服务名（对应 id 为 "base-<name>"）。
+// 用途：工具定义很吃上下文的服务（OpenSandbox 约 11.6k token、Math 约 5.6k）
+// 不适合对每个人默认开启，放进列表让用户按需打开即可。
+const DEFAULT_DISABLED_BASE_IDS = (publicEnv.PUBLIC_MCP_DEFAULT_DISABLED || "")
+	.split(",")
+	.map((s) => s.trim())
+	.filter(Boolean)
+	.map((name) => (name.startsWith("base-") ? name : `base-${name}`));
+
+// Load disabled base server IDs from localStorage.
+// 键不存在 = 用户从未表态，此时套用上面的默认禁用名单；用户手动开关过之后
+// 键就存在了，一切以用户的选择为准。
 function loadDisabledBaseIds(): Set<string> {
 	if (!browser) return new Set();
 
 	try {
 		const json = localStorage.getItem(STORAGE_KEYS.DISABLED_BASE_IDS);
-		return new Set(json ? JSON.parse(json) : []);
+		if (json === null) return new Set(DEFAULT_DISABLED_BASE_IDS);
+		return new Set(JSON.parse(json));
 	} catch (error) {
 		console.error("Failed to load disabled base MCP server IDs from localStorage:", error);
-		return new Set();
+		return new Set(DEFAULT_DISABLED_BASE_IDS);
 	}
 }
 
@@ -247,7 +260,7 @@ export function disableAllServers() {
 export function addCustomServer(server: Omit<MCPServer, "id" | "type" | "status">): string {
 	const newServer: MCPServer = {
 		...server,
-		id: crypto.randomUUID(),
+		id: randomUUID(),
 		type: "custom",
 		status: "disconnected",
 	};

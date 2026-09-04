@@ -26,3 +26,18 @@ models/*
 /playwright-report
 /blob-report
 /playwright/.cache
+# --- 本地部署分支：以下都不入库 ---
+# 就地改文件前留的时间戳备份 / 原始副本
+*.bak
+*.bak-*
+*.orig
+*.orig-*
+build.bak-*
+# 一次性排障脚本（连本机 MongoDB、打印运行时配置）
+dbstat.mjs
+dbfields.mjs
+mcpcheck.mjs
+# 私有配置：.env.* 已在上面覆盖，这里再显式挡一次运维备份
+SECRET_CONFIG*
+*.pem
+*.key

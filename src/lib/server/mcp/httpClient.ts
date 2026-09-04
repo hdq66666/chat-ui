@@ -3,6 +3,7 @@ import type { InputRequests, InputResponses } from "@modelcontextprotocol/client
 import {
 	getClient,
 	getAttributableClient,
+	getConversationClient,
 	evictFromPool,
 	retainClient,
 	releaseClient,
@@ -26,6 +27,21 @@ export interface McpServerConfig {
 	name: string;
 	url: string;
 	headers?: Record<string, string>;
+}
+
+/**
+ * Servers whose connection must not be shared between conversations, by name or
+ * url, comma-separated. Their state (browser cookies, storage, open pages) is
+ * per-connection, so a shared one would leak it from one chat to the next.
+ */
+function isPerConversationServer(server: McpServerConfig): boolean {
+	const raw = config.MCP_PER_CONVERSATION;
+	if (!raw) return false;
+	const wanted = raw
+		.split(",")
+		.map((s: string) => s.trim().toLowerCase())
+		.filter(Boolean);
+	return wanted.includes(server.name.toLowerCase()) || wanted.includes(server.url.toLowerCase());
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -142,6 +158,7 @@ export async function callMcpTool(
 		onProgress,
 		elicitation,
 		resume,
+		conversationId,
 	}: {
 		timeoutMs?: number;
 		signal?: AbortSignal;
@@ -151,6 +168,8 @@ export async function callMcpTool(
 		elicitation?: { sink: ElicitationSink; toolUuid: string };
 		/** Answers to a previous `input_required`, replayed verbatim to continue that call. */
 		resume?: { inputResponses: InputResponses; requestState?: string };
+		/** Chat this call belongs to, so a per-conversation server gets its own connection. */
+		conversationId?: string;
 	} = {}
 ): Promise<McpToolTextResponse> {
 	const normalizedArgs =
@@ -162,11 +181,20 @@ export async function callMcpTool(
 	// via the request options below, not on the pooled transport itself. A call that can
 	// be interrupted for input needs a connection its prompts can be attributed on, so the
 	// preloaded shared client is not reused for one.
-	const scoped = elicitation
-		? await getAttributableClient(server, elicitation.sink.conversationId.toString(), signal)
-		: undefined;
+	const convId = elicitation?.sink.conversationId.toString() ?? conversationId;
+	const scoped = !convId
+		? undefined
+		: isPerConversationServer(server)
+			? await getConversationClient(server, convId, signal)
+			: elicitation
+				? await getAttributableClient(server, convId, signal)
+				: undefined;
 	const isolation = scoped?.isolation;
-	let activeClient = scoped?.client ?? client ?? (await getClient(server, signal));
+	// The preloaded shared client is not valid for a conversation-scoped server.
+	let activeClient =
+		scoped?.client ??
+		(isolation ? undefined : client) ??
+		(await getClient(server, signal, isolation));
 
 	const deadline = createCallDeadline(timeoutMs, signal);
 

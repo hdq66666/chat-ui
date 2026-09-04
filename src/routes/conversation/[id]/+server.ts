@@ -1,4 +1,5 @@
 import { authCondition } from "$lib/server/auth";
+import { env as publicEnv } from "$env/dynamic/public";
 import { collections } from "$lib/server/database";
 import { config } from "$lib/server/config";
 import { models, validModelIdSchema } from "$lib/server/models";
@@ -270,9 +271,13 @@ export async function POST({ request, locals, params, getClientAddress }) {
 			}) ?? [];
 
 	// check sizes
-	// todo: make configurable
-	if (b64Files.some((file) => file.size > 10 * 1024 * 1024)) {
-		error(413, "File too large, should be <10MB");
+	// 上限走 PUBLIC_MAX_UPLOAD_MB，和 FileDropzone.svelte 同一个变量。
+	// 这里量的是解码后的字节数（b64Files 由 Buffer.from(value,"base64")
+	// 重建），和前端 file.size 口径一致。
+	const MAX_UPLOAD_MB = Number(publicEnv.PUBLIC_MAX_UPLOAD_MB || 10);
+	const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
+	if (b64Files.some((file) => file.size > MAX_UPLOAD_BYTES)) {
+		error(413, `File too large, should be <${MAX_UPLOAD_MB}MB`);
 	}
 
 	const uploadedFiles = await Promise.all(b64Files.map((file) => uploadFile(file, conv))).then(

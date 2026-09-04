@@ -195,11 +195,10 @@
 			: convsStore.list.find((conv) => conv.id === page.params.id)?.title
 	);
 
-	// Show the welcome modal once on first app load
-	let showWelcome = $derived(
-		!$settings.welcomeModalSeen &&
-			!(page.data.shared === true && page.route.id?.startsWith("/conversation/"))
-	);
+	// [LOCAL] 单租户部署禁用欢迎弹窗。
+	// 原逻辑依赖 $settings.welcomeModalSeen（存 MongoDB 的 per-user settings），
+	// 换浏览器或开无痕会重新弹；只有一个使用者时没必要，直接恒为 false。
+	let showWelcome = $derived(false);
 
 	// Shared conversation views define their own social preview tags
 	// (see SharePreviewTags.svelte), so skip the generic ones there

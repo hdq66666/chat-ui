@@ -540,6 +540,53 @@ export async function prepareMessagesWithFiles(
 	return resolved.flat();
 }
 
+/**
+ * 一次请求最多能带几张图。必须和 vLLM 的 --limit-mm-per-prompt
+ * image.count 对齐；超了 vLLM 会直接拒掉整个请求。
+ */
+const MAX_IMAGES_PER_REQUEST = Number(process.env.MAX_IMAGES_PER_REQUEST || 12);
+
+/** PDF 渲染倍率，1 = 72dpi。2 时 A4 约 1190x1683，模型可读 6pt 正文。 */
+const PDF_RENDER_SCALE = Number(process.env.PDF_RENDER_SCALE || 2);
+
+/**
+ * 渲染一份 PDF 的时间上限。矢量内容极密的 PDF 单页就能跑很久
+ * （实测 32 万散点/页时 3 页要 449 秒），不设上限等于给每个访客
+ * 一个能占住服务端的开关。超时按已渲染的页返回，不整轮失败。
+ */
+const PDF_RENDER_TIMEOUT_MS = Number(process.env.PDF_RENDER_TIMEOUT_MS || 60000);
+
+/**
+ * 把 PDF 每页渲染成 PNG。返回 data URL 数组，最多 limit 页。
+ * 渲染失败不抛出 —— 一个坏 PDF 不应该让整轮对话失败，交给调用方在
+ * 文本里说明。
+ */
+async function renderPdfPages(
+	buffer: Buffer,
+	limit: number
+): Promise<{ urls: string[]; total: number; error?: string; timedOut?: boolean }> {
+	if (limit <= 0) return { urls: [], total: 0 };
+	try {
+		const { pdf } = await import("pdf-to-img");
+		const deadline = Date.now() + PDF_RENDER_TIMEOUT_MS;
+		const doc = await pdf(buffer, { scale: PDF_RENDER_SCALE });
+		const urls: string[] = [];
+		let timedOut = false;
+		for await (const page of doc) {
+			if (urls.length >= limit) break;
+			urls.push(`data:image/png;base64,${page.toString("base64")}`);
+			// 渲染是同步阻塞的，只能在页与页之间收手
+			if (Date.now() > deadline) {
+				timedOut = true;
+				break;
+			}
+		}
+		return { urls, total: doc.length, timedOut };
+	} catch (e) {
+		return { urls: [], total: 0, error: e instanceof Error ? e.message : String(e) };
+	}
+}
+
 async function prepareFiles(
 	imageProcessor: ReturnType<typeof makeImageProcessor>,
 	files: MessageFile[],
@@ -549,6 +596,7 @@ async function prepareFiles(
 	textContent: string;
 }> {
 	const imageFiles = files.filter((file) => file.mime.startsWith("image/"));
+	const pdfFiles = files.filter((file) => (file.mime || "").toLowerCase() === "application/pdf");
 	const textFiles = files.filter((file) => {
 		const mime = (file.mime || "").toLowerCase();
 		const [fileType, fileSubtype] = mime.split("/");
@@ -572,6 +620,43 @@ async function prepareFiles(
 		}));
 	}
 
+	// PDF：逐页渲染成图，接在用户自己贴的图后面。额度和图片共享，
+	// 因为对 vLLM 来说它们都是 image。
+	const pdfNotes: string[] = [];
+	if (isMultimodal && pdfFiles.length > 0) {
+		let budget = MAX_IMAGES_PER_REQUEST - imageParts.length;
+		for (const file of pdfFiles) {
+			const buf = Buffer.from(file.value, "base64");
+			const { urls, total, error, timedOut } = await renderPdfPages(buf, budget);
+			if (error) {
+				pdfNotes.push(`[无法读取 PDF "${file.name}"：${error}]`);
+				continue;
+			}
+			imageParts.push(
+				...urls.map((url) => ({
+					type: "image_url" as const,
+					image_url: { url, detail: "auto" as const },
+				}))
+			);
+			budget -= urls.length;
+			if (timedOut) {
+				pdfNotes.push(
+					`[PDF "${file.name}" 共 ${total} 页，内容过于复杂，渲染超过 ` +
+						`${Math.round(PDF_RENDER_TIMEOUT_MS / 1000)} 秒后停止，仅附上前 ${urls.length} 页。]`
+				);
+			} else {
+				pdfNotes.push(
+					total > urls.length
+						? `[PDF "${file.name}" 共 ${total} 页，因单次请求最多 ${MAX_IMAGES_PER_REQUEST} 张图，` +
+								`仅附上前 ${urls.length} 页。需要后面的内容请让用户拆分后重发。]`
+						: `[PDF "${file.name}" 共 ${total} 页，已全部作为图片附上。]`
+				);
+			}
+		}
+	} else if (!isMultimodal && pdfFiles.length > 0) {
+		pdfNotes.push("[当前模型不支持图片输入，无法读取 PDF 附件。]");
+	}
+
 	let textContent = "";
 	if (textFiles.length > 0) {
 		const textParts = await Promise.all(
@@ -581,6 +666,10 @@ async function prepareFiles(
 			})
 		);
 		textContent = textParts.join("\n\n");
+	}
+
+	if (pdfNotes.length > 0) {
+		textContent = [textContent, ...pdfNotes].filter(Boolean).join("\n\n");
 	}
 
 	return { imageParts, textContent };

@@ -136,8 +136,9 @@
 		class="flex items-center rounded-xl text-lg font-semibold select-none"
 		href="{publicConfig.PUBLIC_ORIGIN}{base}/"
 	>
+		<!-- [LOCAL] 隐藏左上角应用名：长模型名会折成两行。
+		     Logo 保留，因为外层 <a> 是回首页的入口。 -->
 		<Logo classNames="dark:invert mr-[2px]" />
-		{publicConfig.PUBLIC_APP_NAME}
 	</a>
 	<a
 		href={`${base}/`}

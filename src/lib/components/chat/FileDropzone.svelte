@@ -1,6 +1,12 @@
 <script lang="ts">
 	import { requireAuthUser } from "$lib/utils/auth";
 	import { mimeMatchesAllowlist } from "$lib/utils/mimeMatch";
+	import { env as publicEnv } from "$env/dynamic/public";
+
+	// 上传体积上限，和服务端 conversation/[id]/+server.ts 用同一个变量；
+	// 只改一边的话，要么前端不让选，要么选了被服务端 413 拦下。
+	const MAX_UPLOAD_MB = Number(publicEnv.PUBLIC_MAX_UPLOAD_MB || 10);
+	const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 	import CarbonImage from "~icons/carbon/image";
 
 	interface Props {
@@ -42,9 +48,9 @@
 							return;
 						}
 
-						// if file is bigger than 10MB abort
-						if (file.size > 10 * 1024 * 1024) {
-							setErrorMsg("Some file is too big. (10MB max)");
+						// if file is bigger than the configured limit, abort
+						if (file.size > MAX_UPLOAD_BYTES) {
+							setErrorMsg(`Some file is too big. (${MAX_UPLOAD_MB}MB max)`);
 							files = [];
 							return;
 						}

@@ -59,7 +59,10 @@ export type McpFlowResult =
 	/** A 2026-era prompt is open; the run ends here and resumes when it is answered. */
 	| "awaiting_input";
 
-const MAX_TOOL_ROUNDS = 10;
+// Browser and shell tools spend rounds quickly: a single page-reading task is
+// easily a dozen navigate/snapshot/evaluate steps. Override with
+// MCP_MAX_TOOL_ROUNDS.
+const MAX_TOOL_ROUNDS = Number(config.MCP_MAX_TOOL_ROUNDS) || 200;
 
 // ML Assistant runs jobs, and the round budget is what it spends grounding ids,
 // auditing a dataset, reading a working example and then submitting: ten does not
@@ -1078,11 +1081,19 @@ export async function* runMcpFlow({
 		// Not "not_applicable": that re-runs the turn with no tools and discards every
 		// tool result this turn produced.
 		logger.warn({ maxRounds: maxToolRounds }, "[mcp] tool-round budget exhausted");
+		// A thinking model's last turn is usually a <think> block plus tool calls and
+		// no prose. Finalizing that verbatim renders as an empty message -- the turn
+		// looks like it died rather than ran out of steps -- so fall back whenever
+		// nothing survives stripping the reasoning, not just when the whole string
+		// is empty.
+		const exhaustedVisible = lastAssistantContent
+			.replace(/<think>[\s\S]*?(?:<\/think>|$)/g, "")
+			.trim();
 		const exhaustedText =
-			lastAssistantContent.trim().length > 0
+			exhaustedVisible.length > 0
 				? lastAssistantContent
-				: "I stopped after too many tool steps without reaching an answer. Try narrowing the request or breaking it into smaller ones.";
-		if (!streamedContent) {
+				: `I stopped after ${maxToolRounds} tool steps without reaching an answer. Try narrowing the request, or breaking it into smaller ones.`;
+		if (!streamedContent || exhaustedVisible.length === 0) {
 			yield { type: MessageUpdateType.Stream, token: exhaustedText };
 		}
 		yield { type: MessageUpdateType.FinalAnswer, text: exhaustedText, interrupted: false };

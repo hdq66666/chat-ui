@@ -415,6 +415,7 @@ export async function* executeToolCalls({
 					signal: abortSignal,
 					timeoutMs: effectiveTimeoutMs,
 					...(elicitationSink ? { elicitation: { sink: elicitationSink, toolUuid: p.uuid } } : {}),
+					conversationId: elicitation?.conversationId?.toString(),
 					onProgress: (progress) => {
 						updatesQueue.push({
 							type: MessageUpdateType.Tool,

@@ -181,6 +181,23 @@ export function evictFromPool(server: McpServerConfig, isolation?: string): Clie
  * means a prompt raised for one chat gets declined because another chat is also mid-call.
  * A modern server answers the call itself, so it keeps the shared connection.
  */
+/**
+ * A connection scoped to one conversation, unconditionally.
+ *
+ * `getAttributableClient` below falls back to the shared connection when the
+ * server answers elicitations itself. This one never does: it is for servers
+ * where the connection carries state that must not cross conversations, such as
+ * a browser session with its own cookie jar.
+ */
+export async function getConversationClient(
+	server: McpServerConfig,
+	conversationId: string,
+	signal?: AbortSignal
+): Promise<{ client: Client; isolation: string }> {
+	const isolation = `conversation:${conversationId}`;
+	return { client: await getClient(server, signal, isolation), isolation };
+}
+
 export async function getAttributableClient(
 	server: McpServerConfig,
 	conversationId: string,

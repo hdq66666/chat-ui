@@ -11,12 +11,13 @@
  */
 
 import { browser } from "$app/environment";
+import { randomUUID } from "$lib/utils/randomUuid";
 
 const store: Map<string, File[]> = browser ? new Map() : (null as unknown as Map<string, File[]>);
 
 /** Save files under a nonce and return the nonce. */
 export function storePendingFiles(files: File[]): string {
-	const nonce = crypto.randomUUID();
+	const nonce = randomUUID();
 	if (browser) {
 		store.set(nonce, files);
 	}
