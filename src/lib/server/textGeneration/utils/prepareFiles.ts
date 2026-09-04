@@ -428,7 +428,13 @@ export async function prepareMessagesWithFiles(
 
 				if (imageParts.length > 0 && isMultimodal) {
 					const parts = [{ type: "text" as const, text: messageText }, ...imageParts];
-					return [{ role: message.from, content: parts }];
+					// video_url 不在 OpenAI 的 content part 联合类型里，但 vLLM 认。
+					return [
+						{
+							role: message.from,
+							content: parts as OpenAI.Chat.Completions.ChatCompletionContentPart[],
+						},
+					];
 				}
 
 				return [{ role: message.from, content: messageText }];
@@ -553,6 +559,35 @@ const MAX_IMAGES_PER_REQUEST = Number(process.env.MAX_IMAGES_PER_REQUEST || 64);
  */
 const MAX_PDF_PAGES_PER_REQUEST = Number(process.env.MAX_PDF_PAGES_PER_REQUEST || 48);
 
+/**
+ * 一次请求最多带几个视频。必须和 vLLM 的 --limit-mm-per-prompt
+ * video.count 对齐；和图片额度互不相干，超了同样是整个请求被拒。
+ */
+const MAX_VIDEOS_PER_REQUEST = Number(process.env.MAX_VIDEOS_PER_REQUEST || 1);
+
+/**
+ * 单个视频的体积上限。视频是原样透传给 vLLM 的（base64 后约为 4/3），
+ * 抽帧和降采样都在服务端做，所以这里限制的是传输和内存，不是 token。
+ */
+const MAX_VIDEO_MB = Number(process.env.MAX_VIDEO_MB || 50);
+
+/**
+ * 只放行 OpenCV 能解的容器。vLLM 用 cv2 解码（decord/PyAV 都没装），
+ * 它解不开的格式会在服务端抛错，不如在这里就挡掉并告诉用户。
+ */
+const VIDEO_MIME_ALLOWLIST = ["video/mp4", "video/webm", "video/quicktime"];
+
+/**
+ * vLLM / Qwen 的扩展 content part。OpenAI 的类型里没有 video_url，
+ * 所以自己声明一个，出口处再收窄回 OpenAI 的类型。
+ */
+type VideoContentPart = {
+	type: "video_url";
+	video_url: { url: string };
+};
+
+type MediaContentPart = OpenAI.Chat.Completions.ChatCompletionContentPartImage | VideoContentPart;
+
 /** PDF 渲染倍率，1 = 72dpi。2 时 A4 约 1190x1683，模型可读 6pt 正文。 */
 const PDF_RENDER_SCALE = Number(process.env.PDF_RENDER_SCALE || 2);
 
@@ -599,11 +634,14 @@ async function prepareFiles(
 	files: MessageFile[],
 	isMultimodal: boolean
 ): Promise<{
-	imageParts: OpenAI.Chat.Completions.ChatCompletionContentPartImage[];
+	imageParts: MediaContentPart[];
 	textContent: string;
 }> {
 	const imageFiles = files.filter((file) => file.mime.startsWith("image/"));
 	const pdfFiles = files.filter((file) => (file.mime || "").toLowerCase() === "application/pdf");
+	const videoFiles = files.filter((file) =>
+		VIDEO_MIME_ALLOWLIST.includes((file.mime || "").toLowerCase())
+	);
 	const textFiles = files.filter((file) => {
 		const mime = (file.mime || "").toLowerCase();
 		const [fileType, fileSubtype] = mime.split("/");
@@ -615,7 +653,7 @@ async function prepareFiles(
 		});
 	});
 
-	let imageParts: OpenAI.Chat.Completions.ChatCompletionContentPartImage[] = [];
+	let imageParts: MediaContentPart[] = [];
 	if (isMultimodal && imageFiles.length > 0) {
 		const processedFiles = await Promise.all(imageFiles.map(imageProcessor));
 		imageParts = processedFiles.map((file) => ({
@@ -625,6 +663,37 @@ async function prepareFiles(
 				detail: "auto",
 			},
 		}));
+	}
+
+	// 视频：原样透传，抽帧交给 vLLM。服务端按 --media-io-kwargs 里的
+	// fps / num_frames 采样（当前 2fps、最多 120 帧 = 60 秒），并按模型
+	// 自己的像素预算压分辨率，所以这里不需要、也不应该自己抽帧 —— 那会
+	// 丢掉时序编码和时间戳。
+	const videoNotes: string[] = [];
+	if (isMultimodal && videoFiles.length > 0) {
+		const accepted = videoFiles.slice(0, MAX_VIDEOS_PER_REQUEST);
+		for (const file of accepted) {
+			const bytes = Buffer.byteLength(file.value, "base64");
+			if (bytes > MAX_VIDEO_MB * 1024 * 1024) {
+				videoNotes.push(
+					`[视频 "${file.name}" 约 ${(bytes / 1024 / 1024).toFixed(1)}MB，` +
+						`超过单个视频 ${MAX_VIDEO_MB}MB 的上限，未附上。]`
+				);
+				continue;
+			}
+			imageParts.push({
+				type: "video_url" as const,
+				video_url: { url: `data:${file.mime};base64,${file.value}` },
+			});
+		}
+		if (videoFiles.length > accepted.length) {
+			videoNotes.push(
+				`[本轮共 ${videoFiles.length} 个视频，单次请求最多 ${MAX_VIDEOS_PER_REQUEST} 个，` +
+					`仅附上第一个。其余请分多轮发送。]`
+			);
+		}
+	} else if (!isMultimodal && videoFiles.length > 0) {
+		videoNotes.push("[当前模型不支持视觉输入，无法读取视频附件。]");
 	}
 
 	// PDF：逐页渲染成图，接在用户自己贴的图后面。额度和图片共享
@@ -677,8 +746,8 @@ async function prepareFiles(
 		textContent = textParts.join("\n\n");
 	}
 
-	if (pdfNotes.length > 0) {
-		textContent = [textContent, ...pdfNotes].filter(Boolean).join("\n\n");
+	if (pdfNotes.length > 0 || videoNotes.length > 0) {
+		textContent = [textContent, ...videoNotes, ...pdfNotes].filter(Boolean).join("\n\n");
 	}
 
 	return { imageParts, textContent };

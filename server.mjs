@@ -22,9 +22,11 @@ process.env.PORT ||= "80";
 process.env.ORIGIN ||=
 	process.env.PUBLIC_ORIGIN ||
 	`http://localhost${process.env.PORT === "80" ? "" : ":" + process.env.PORT}`;
-// 请求体里附件是 base64，约为原始体积的 4/3；按单文件 20MB、可同时传多个
-// 估算留余量。仅内网可访问，放宽的风险可控。
-process.env.BODY_SIZE_LIMIT ||= "104857600"; // 100MB
+// 附件是 base64 装在 multipart 里的（见 conversation/[id]/+server.ts，
+// 文件名前缀就是 "base64;"），所以线上体积约为原始的 4/3：单文件上限
+// PUBLIC_MAX_UPLOAD_MB=50（视频）就是 67MB，再加同一轮的图片和文档，
+// 留一倍余量。仅内网可访问，放宽的风险可控。
+process.env.BODY_SIZE_LIMIT ||= "209715200"; // 200MB
 
 for (const k of [
 	"OPENAI_BASE_URL",
