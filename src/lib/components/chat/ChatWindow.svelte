@@ -60,6 +60,7 @@
 	import { usePublicConfig } from "$lib/utils/PublicConfig.svelte";
 	import { pendingComposerPayload } from "$lib/stores/pendingComposerPayload";
 	import { mimeMatchesAllowlist } from "$lib/utils/mimeMatch";
+	import { resolveFileMime } from "$lib/utils/mime";
 	import LucideHammer from "~icons/lucide/hammer";
 	import LucideSparkles from "~icons/lucide/sparkles";
 	import MlAssistantStrip from "./MlAssistantStrip.svelte";
@@ -235,7 +236,7 @@
 
 			// filter based on activeMimeTypes, including wildcards
 			const filteredFiles = pastedFiles.filter((file) =>
-				mimeMatchesAllowlist(file.type, activeMimeTypes)
+				mimeMatchesAllowlist(resolveFileMime(file.name, file.type), activeMimeTypes)
 			);
 
 			files = [...files, ...filteredFiles];
@@ -604,7 +605,7 @@
 		const pending = $pendingComposerPayload;
 		if (!pending || shared) return;
 		const accepted = (pending.files ?? []).filter((file) =>
-			mimeMatchesAllowlist(file.type, activeMimeTypes)
+			mimeMatchesAllowlist(resolveFileMime(file.name, file.type), activeMimeTypes)
 		);
 		if (accepted.length) {
 			files = [...untrack(() => files), ...accepted];

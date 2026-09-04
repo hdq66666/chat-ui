@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { requireAuthUser } from "$lib/utils/auth";
 	import { mimeMatchesAllowlist } from "$lib/utils/mimeMatch";
+	import { resolveFileMime } from "$lib/utils/mime";
 	import { env as publicEnv } from "$env/dynamic/public";
 
 	// 上传体积上限，和服务端 conversation/[id]/+server.ts 用同一个变量；
@@ -38,11 +39,13 @@
 					if (file) {
 						// check if the file matches the mimeTypes
 						// else abort
-						if (!mimeMatchesAllowlist(file.type, mimeTypes)) {
+						// 用扩展名兜底的类型来判，浏览器给 HEIC 的 type 常常是空的。
+						const fileMime = resolveFileMime(file.name, file.type);
+						if (!mimeMatchesAllowlist(fileMime, mimeTypes)) {
 							setErrorMsg(
 								`Some file type not supported. Only allowed: ${mimeTypes.join(
 									", "
-								)}. Uploaded document is of type ${file.type}`
+								)}. Uploaded document is of type ${fileMime || "unknown"}`
 							);
 							files = [];
 							return;

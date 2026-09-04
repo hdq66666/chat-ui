@@ -38,6 +38,46 @@ export function createImageProcessorOptionsValidator<TMimeType extends string = 
 		.default(defaults);
 }
 
+/**
+ * iPhone 的默认拍照格式。sharp 预编译包里的 libvips 认得 HEIC 容器，却没有
+ * 链接 libde265 —— HEVC 解码器因专利原因被排除在外（那个 .so 里 de265_
+ * 符号数是 0），所以 sharp 读 HEIC 会失败。libheif 的 WASM 版把解码器带了
+ * 进来，先解成 RGBA，再交回 sharp 走原来的缩放和转码。
+ *
+ * 只解不编：编 HEVC 才需要授权，所以 HEIC 永远不会出现在输出格式里。
+ */
+const HEIC_MIMES = ["image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence"];
+
+/** 明确是 HEVC 编码的 ISO-BMFF brand。见 libheif issue #83。 */
+const HEVC_BRANDS = ["heic", "heix", "hevc", "hevx"];
+
+/** 通用 HEIF brand —— AVIF 也可能用，所以只在 mime 已声明是 HEIC 时才认。 */
+const GENERIC_HEIF_BRANDS = ["mif1", "msf1"];
+
+function heifBrand(buffer: Buffer): string | undefined {
+	// ISO-BMFF：4 字节 box 长度、"ftyp"、4 字节 major brand。
+	if (buffer.length < 12) return undefined;
+	if (buffer.toString("latin1", 4, 8) !== "ftyp") return undefined;
+	return buffer.toString("latin1", 8, 12).replace("\0", " ").trim();
+}
+
+export function needsHeifDecoder(buffer: Buffer, mime: string): boolean {
+	const brand = heifBrand(buffer);
+	if (brand && HEVC_BRANDS.includes(brand)) return true;
+	if (!HEIC_MIMES.includes(mime.toLowerCase())) return false;
+	// mime 说是 HEIC 但 brand 通用或读不出来：也交给 libheif，它会再判一次。
+	return !brand || GENERIC_HEIF_BRANDS.includes(brand);
+}
+
+async function decodeHeifToSharp(buffer: Buffer): Promise<Sharp> {
+	// 动态 import：libheif 的 wasm 有 6MB，只有真收到 HEIC 才值得加载。
+	const { default: decodeHeic } = await import("heic-decode");
+	const { width, height, data } = await decodeHeic({ buffer });
+	return sharp(Buffer.from(data.buffer, data.byteOffset, data.byteLength), {
+		raw: { width, height, channels: 4 },
+	});
+}
+
 export function makeImageProcessor<TMimeType extends string = string>(
 	options: ImageProcessorOptions<TMimeType>
 ): ImageProcessor<TMimeType> {
@@ -46,7 +86,8 @@ export function makeImageProcessor<TMimeType extends string = string>(
 		const { mime, value } = file;
 
 		const buffer = Buffer.from(value, "base64");
-		let sharpInst = sharp(buffer);
+		const isHeic = needsHeifDecoder(buffer, mime);
+		let sharpInst = isHeic ? await decodeHeifToSharp(buffer) : sharp(buffer);
 
 		const metadata = await sharpInst.metadata();
 		if (!metadata) throw Error("Failed to read image metadata");
@@ -56,9 +97,16 @@ export function makeImageProcessor<TMimeType extends string = string>(
 		const tooLargeInSize = width > maxWidth || height > maxHeight;
 		const tooLargeInBytes = buffer.byteLength > maxSizeInMB * 1000 * 1000;
 
-		const outputMime = chooseMimeType(supportedMimeTypes, preferredMimeType, mime, {
-			preferSizeReduction: tooLargeInBytes,
-		});
+		// HEIC 解出来是裸像素，没有容器可留，必然要重新编码。这里用 image/png
+		// 顶替输入类型，只是为了绕开 chooseMimeType 里对 heic 的黑名单 —— 那条
+		// 黑名单针对的是「输出」，配合 preferSizeReduction 最终会落到
+		// supportedMimeTypes 里最省的那个格式（照片场景就是 jpeg）。
+		const outputMime = chooseMimeType(
+			supportedMimeTypes,
+			preferredMimeType,
+			isHeic ? "image/png" : mime,
+			{ preferSizeReduction: tooLargeInBytes || isHeic }
+		);
 
 		// Resize if necessary
 		if (tooLargeInSize || tooLargeInBytes) {
@@ -103,9 +151,8 @@ export function convertImage(sharpInst: Sharp, outputMime: string): Sharp {
 	return sharpInst[format]();
 }
 
-// heic/heif requires proprietary license
-// TODO: blocking heif may be incorrect considering it also supports av1, so we should instead
-// detect the compression method used via sharp().metadata().compression
+// 输出侧的黑名单：编 HEVC 需要专利授权，所以永远不产出 heic/heif。
+// 输入侧不再受此限制 —— 见 decodeHeifToSharp，解码走 libheif 的 WASM。
 // TODO: consider what to do about animated formats: apng, gif, animated webp, ...
 const blocklistedMimes = ["image/heic", "image/heif"];
 

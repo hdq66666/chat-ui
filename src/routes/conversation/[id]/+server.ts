@@ -16,6 +16,7 @@ import {
 	type MessageUpdate,
 } from "$lib/types/MessageUpdate";
 import { uploadFile } from "$lib/server/files/uploadFile";
+import { resolveFileMime } from "$lib/utils/mime";
 import { convertLegacyConversation } from "$lib/utils/tree/convertLegacyConversation";
 import { isMessageId } from "$lib/utils/tree/isMessageId";
 import { buildSubtree } from "$lib/utils/tree/buildSubtree.js";
@@ -245,11 +246,15 @@ export async function POST({ request, locals, params, getClientAddress }) {
 			.map(async (file) => {
 				const [type, ...name] = file.name.split(";");
 
+				const fileName = name.join(";");
+
 				return {
 					type: z.literal("base64").or(z.literal("hash")).parse(type),
 					value: await file.text(),
-					mime: file.type,
-					name: name.join(";"),
+					// 浏览器对 HEIC 常给空串或 octet-stream，扩展名兜底，
+					// 否则 prepareFiles 的 image/ 前缀判断会漏掉整张图。
+					mime: resolveFileMime(fileName, file.type),
+					name: fileName,
 				};
 			})
 	);

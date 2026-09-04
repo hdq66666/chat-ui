@@ -8,6 +8,9 @@ const EXTENSION_TO_MIME: Record<string, string> = {
 	gif: "image/gif",
 	webp: "image/webp",
 	svg: "image/svg+xml",
+	heic: "image/heic",
+	heif: "image/heif",
+	avif: "image/avif",
 	pdf: "application/pdf",
 	txt: "text/plain",
 	csv: "text/csv",
@@ -36,6 +39,17 @@ export function guessMimeFromUrl(url: string): string | undefined {
 		/* ignore */
 	}
 	return undefined;
+}
+
+/**
+ * File.type 不可靠：HEIC 尤其常见，部分浏览器/系统给的是空串或
+ * application/octet-stream，白名单校验就会把 iPhone 原图当成未知类型挡掉。
+ * 扩展名兜底，让前端校验和服务端拿到同一个类型。
+ */
+export function resolveFileMime(name: string, type: string | undefined): string {
+	if (type && type !== "application/octet-stream") return type;
+	const ext = name.split(".").pop()?.toLowerCase();
+	return (ext && EXTENSION_TO_MIME[ext]) || type || "";
 }
 
 export function pickSafeMime(
