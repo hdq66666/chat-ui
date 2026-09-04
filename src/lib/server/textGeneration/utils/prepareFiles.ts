@@ -544,7 +544,14 @@ export async function prepareMessagesWithFiles(
  * 一次请求最多能带几张图。必须和 vLLM 的 --limit-mm-per-prompt
  * image.count 对齐；超了 vLLM 会直接拒掉整个请求。
  */
-const MAX_IMAGES_PER_REQUEST = Number(process.env.MAX_IMAGES_PER_REQUEST || 12);
+const MAX_IMAGES_PER_REQUEST = Number(process.env.MAX_IMAGES_PER_REQUEST || 64);
+
+/**
+ * 一次请求最多渲染几页 PDF。和 MAX_IMAGES_PER_REQUEST 分开，是因为
+ * PDF 会一页一张地吃掉整个额度：不留出余量，用户随手拖进来的一份长
+ * 文档就会把他自己贴的截图全部挤掉。两者取较小值作为实际预算。
+ */
+const MAX_PDF_PAGES_PER_REQUEST = Number(process.env.MAX_PDF_PAGES_PER_REQUEST || 48);
 
 /** PDF 渲染倍率，1 = 72dpi。2 时 A4 约 1190x1683，模型可读 6pt 正文。 */
 const PDF_RENDER_SCALE = Number(process.env.PDF_RENDER_SCALE || 2);
@@ -620,11 +627,12 @@ async function prepareFiles(
 		}));
 	}
 
-	// PDF：逐页渲染成图，接在用户自己贴的图后面。额度和图片共享，
-	// 因为对 vLLM 来说它们都是 image。
+	// PDF：逐页渲染成图，接在用户自己贴的图后面。额度和图片共享
+	// （对 vLLM 来说它们都是 image），但另有 PDF 自己的页数上限，
+	// 免得一份长文档把用户贴的截图全挤掉。
 	const pdfNotes: string[] = [];
 	if (isMultimodal && pdfFiles.length > 0) {
-		let budget = MAX_IMAGES_PER_REQUEST - imageParts.length;
+		let budget = Math.min(MAX_IMAGES_PER_REQUEST - imageParts.length, MAX_PDF_PAGES_PER_REQUEST);
 		for (const file of pdfFiles) {
 			const buf = Buffer.from(file.value, "base64");
 			const { urls, total, error, timedOut } = await renderPdfPages(buf, budget);
@@ -647,8 +655,9 @@ async function prepareFiles(
 			} else {
 				pdfNotes.push(
 					total > urls.length
-						? `[PDF "${file.name}" 共 ${total} 页，因单次请求最多 ${MAX_IMAGES_PER_REQUEST} 张图，` +
-								`仅附上前 ${urls.length} 页。需要后面的内容请让用户拆分后重发。]`
+						? `[PDF "${file.name}" 共 ${total} 页，因单次请求最多 ${MAX_IMAGES_PER_REQUEST} 张图、` +
+								`PDF 最多 ${MAX_PDF_PAGES_PER_REQUEST} 页，仅附上前 ${urls.length} 页。` +
+								`需要后面的内容请让用户拆分后重发。]`
 						: `[PDF "${file.name}" 共 ${total} 页，已全部作为图片附上。]`
 				);
 			}

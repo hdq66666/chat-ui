@@ -16,8 +16,12 @@ dotenv.config({ path: "/opt/chat-ui/.env.local" });
 dotenv.config({ path: "/opt/chat-ui/.env" });
 
 process.env.HOST ||= "0.0.0.0";
-process.env.PORT ||= "3000";
-process.env.ORIGIN ||= process.env.PUBLIC_ORIGIN || `http://localhost:${process.env.PORT}`;
+// 标准 HTTP 端口，访问时不用再带 :3000。绑 80 需要 root 或
+// CAP_NET_BIND_SERVICE —— systemd 单元里是 User=root，已满足。
+process.env.PORT ||= "80";
+process.env.ORIGIN ||=
+	process.env.PUBLIC_ORIGIN ||
+	`http://localhost${process.env.PORT === "80" ? "" : ":" + process.env.PORT}`;
 // 请求体里附件是 base64，约为原始体积的 4/3；按单文件 20MB、可同时传多个
 // 估算留余量。仅内网可访问，放宽的风险可控。
 process.env.BODY_SIZE_LIMIT ||= "104857600"; // 100MB
