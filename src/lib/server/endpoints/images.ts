@@ -78,6 +78,15 @@ async function decodeHeifToSharp(buffer: Buffer): Promise<Sharp> {
 	});
 }
 
+/**
+ * HEIC -> JPEG，保持原分辨率。给「存储」用，不是给模型用：浏览器认不出
+ * HEIC，存成 JPEG 才有预览图；缩放仍然由发送时的 image processor 决定。
+ */
+export async function transcodeHeicToJpeg(buffer: Buffer): Promise<Buffer> {
+	const decoded = await decodeHeifToSharp(buffer);
+	return decoded.jpeg({ quality: 90 }).toBuffer();
+}
+
 export function makeImageProcessor<TMimeType extends string = string>(
 	options: ImageProcessorOptions<TMimeType>
 ): ImageProcessor<TMimeType> {

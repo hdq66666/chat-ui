@@ -5,11 +5,13 @@
 	import CarbonDocumentBlank from "~icons/carbon/document-blank";
 	import CarbonDownload from "~icons/carbon/download";
 	import CarbonDocument from "~icons/carbon/document";
+	import CarbonImage from "~icons/carbon/image";
 	import Modal from "../Modal.svelte";
 	import AudioPlayer from "../players/AudioPlayer.svelte";
 	import EosIconsLoading from "~icons/eos-icons/loading";
 	import { base } from "$app/paths";
 	import { TEXT_MIME_ALLOWLIST } from "$lib/constants/mime";
+	import { decodeHeicToDataUrl } from "$lib/utils/heicPreview";
 
 	interface Props {
 		file: MessageFile;
@@ -20,6 +22,31 @@
 	let { file, canClose = true, onclose }: Props = $props();
 
 	let showModal = $state(false);
+
+	/**
+	 * 编辑器里选中的 HEIC 还是原始格式，浏览器渲染不出来。发出去之后服务端
+	 * 存的是转码好的 JPEG，所以这条路只服务发送前的那几秒：在客户端解一次，
+	 * 拿到就换成真的缩略图；解不出来就落到下面的文件卡片，不给一块空白。
+	 */
+	let heicPreview = $state<string | undefined>(undefined);
+
+	$effect(() => {
+		if (file.type !== "base64") return;
+		if (!isImage(file.mime) || isDisplayableImage(file.mime)) return;
+
+		let cancelled = false;
+		decodeHeicToDataUrl(file.value)
+			.then((url) => {
+				if (!cancelled) heicPreview = url;
+			})
+			.catch(() => {
+				// 卡片兜底，不打扰用户
+			});
+
+		return () => {
+			cancelled = true;
+		};
+	});
 
 	// Capture URL once at component creation to prevent reactive updates during navigation
 	let urlNotTrailing = page.url.pathname.replace(/\/$/, "");
@@ -38,6 +65,20 @@
 
 	const isImage = (mime: string) =>
 		mime.startsWith("image/") || mime === "webp" || mime === "jpeg" || mime === "png";
+
+	/**
+	 * 浏览器里除了 Safari 都解不了 HEIC，<img> 会渲染成空白而不是报错。
+	 * 发出去之后服务端存的是转码后的 JPEG（见 uploadFile.ts），所以只有
+	 * 编辑器里这一小段时间拿到的还是原始 HEIC —— 那时候给张卡片，不给空白。
+	 */
+	const BROWSER_UNRENDERABLE_IMAGES = [
+		"image/heic",
+		"image/heif",
+		"image/heic-sequence",
+		"image/heif-sequence",
+	];
+	const isDisplayableImage = (mime: string) =>
+		isImage(mime) && !BROWSER_UNRENDERABLE_IMAGES.includes(mime.toLowerCase());
 
 	const isAudio = (mime: string) =>
 		mime.startsWith("audio/") || mime === "mp3" || mime === "wav" || mime === "x-wav";
@@ -60,13 +101,17 @@
 	const isPlainText = (mime: string) =>
 		mime === "application/vnd.chatui.clipboard" || matchesAllowed(mime, TEXT_MIME_ALLOWLIST);
 
-	let isClickable = $derived(isImage(file.mime) || isPlainText(file.mime));
+	let isClickable = $derived(
+		isDisplayableImage(file.mime) || !!heicPreview || isPlainText(file.mime)
+	);
 </script>
 
 {#if showModal && isClickable}
 	<!-- show the image file full screen, click outside to exit -->
 	<Modal width="xl:max-w-[75dvw]" onclose={() => (showModal = false)}>
-		{#if isImage(file.mime)}
+		{#if !isDisplayableImage(file.mime) && heicPreview}
+			<img src={heicPreview} alt="input from user" class="aspect-auto" />
+		{:else if isDisplayableImage(file.mime)}
 			{#if file.type === "hash"}
 				<img
 					src={urlNotTrailing + "/output/" + file.value}
@@ -141,7 +186,15 @@
 	tabindex="0"
 >
 	<div class="group relative flex items-center rounded-xl shadow-xs">
-		{#if isImage(file.mime)}
+		{#if !isDisplayableImage(file.mime) && heicPreview}
+			<div class="h-36 overflow-hidden rounded-xl">
+				<img
+					src={heicPreview}
+					alt={file.name}
+					class="h-36 bg-gray-200 object-cover dark:bg-gray-800"
+				/>
+			</div>
+		{:else if isDisplayableImage(file.mime)}
 			<div class="h-36 overflow-hidden rounded-xl">
 				<img
 					src={file.type === "base64"
@@ -169,6 +222,24 @@
 						: urlNotTrailing + "/output/" + file.value}
 					controls
 				></video>
+			</div>
+		{:else if isImage(file.mime)}
+			<!-- 浏览器解不了的图片格式（HEIC）。服务端存的时候会转成 JPEG，
+			     所以这只是编辑器里的过渡态：给一张卡片，不给一块空白。 -->
+			<div
+				class="flex h-14 w-64 items-center gap-2 overflow-hidden rounded-xl border border-gray-200 bg-white p-2 2xl:w-72 dark:border-gray-800 dark:bg-gray-900"
+			>
+				<div
+					class="grid size-10 flex-none place-items-center rounded-lg bg-gray-100 dark:bg-gray-800"
+				>
+					<CarbonImage class="text-base text-gray-700 dark:text-gray-300" />
+				</div>
+				<dl class="flex flex-col items-start truncate leading-tight">
+					<dd class="text-sm">
+						{truncateMiddle(file.name, 28)}
+					</dd>
+					<dt class="text-xs text-gray-400">Preview available once sent</dt>
+				</dl>
 			</div>
 		{:else if isPlainText(file.mime)}
 			<div
