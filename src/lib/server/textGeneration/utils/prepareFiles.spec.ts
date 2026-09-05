@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { prepareMessagesWithFiles } from "./prepareFiles";
 import type { EndpointMessage } from "$lib/server/endpoints/endpoints";
 import type { makeImageProcessor } from "$lib/server/endpoints/images";
@@ -1033,5 +1033,234 @@ describe("prepareMessagesWithFiles tool history replay", () => {
 		});
 		const callMessage = prepared[0] as { tool_calls?: Array<{ id: string }> };
 		expect(callMessage.tool_calls?.[0]?.id).toBe("u10000000");
+	});
+});
+
+// --- attachments of mixed formats in one message -------------------------
+
+/** Stand-in image processor: echoes the file back, no sharp, no I/O. */
+const echoProcessor = (async (file: { mime: string }) => ({
+	mime: file.mime,
+	image: { toString: () => "IMG" },
+})) as unknown as ReturnType<typeof makeImageProcessor>;
+
+const b64 = (text: string) => Buffer.from(text, "utf-8").toString("base64");
+
+const file = (name: string, mime: string, value = b64(name)) => ({
+	type: "base64" as const,
+	name,
+	mime,
+	value,
+});
+
+/** A user turn carrying `files`, run through the real prepare path. */
+const prepareUserFiles = async (
+	files: ReturnType<typeof file>[],
+	{ multimodal = true, content = "look at these" } = {}
+) => {
+	const [message] = await prepareMessagesWithFiles(
+		[{ from: "user", content, files }],
+		echoProcessor,
+		multimodal
+	);
+	const parts = Array.isArray(message.content)
+		? (message.content as { type: string; image_url?: { url: string } }[])
+		: [];
+	return {
+		text: Array.isArray(message.content)
+			? ((message.content as { type: string; text?: string }[])[0].text ?? "")
+			: (message.content as string),
+		parts,
+		images: parts.filter((p) => p.type === "image_url"),
+		videos: parts.filter((p) => p.type === "video_url"),
+	};
+};
+
+const pdfMock = vi.hoisted(() => ({
+	pages: [] as string[],
+	total: 0,
+	failWith: null as string | null,
+}));
+
+vi.mock("pdf-to-img", () => ({
+	pdf: async () => {
+		if (pdfMock.failWith) throw new Error(pdfMock.failWith);
+		const pages = pdfMock.pages;
+		return {
+			length: pdfMock.total,
+			async *[Symbol.asyncIterator]() {
+				for (const page of pages) yield { toString: () => page };
+			},
+		};
+	},
+}));
+
+const mockPdf = (total: number) => {
+	pdfMock.total = total;
+	pdfMock.pages = Array.from({ length: total }, (_, i) => `PAGE${i + 1}`);
+	pdfMock.failWith = null;
+};
+
+describe("attachments of mixed formats in one message", () => {
+	beforeEach(() => {
+		pdfMock.pages = [];
+		pdfMock.total = 0;
+		pdfMock.failWith = null;
+	});
+
+	it("carries images, a PDF, a video and a text file in one turn, each accounted for", async () => {
+		mockPdf(2);
+		const { text, images, videos } = await prepareUserFiles([
+			file("shot.png", "image/png"),
+			file("report.pdf", "application/pdf"),
+			file("notes.md", "text/markdown", b64("# hello")),
+			file("clip.mp4", "video/mp4"),
+		]);
+
+		expect(images).toHaveLength(3); // 1 screenshot + 2 PDF pages
+		expect(videos).toHaveLength(1);
+		// The manifest lists every file in the order the user attached them, and
+		// maps each one onto the image ordinals the model actually receives.
+		expect(text).toContain("1. shot.png —— 图片，第 1 张图。");
+		expect(text).toContain("2. report.pdf —— PDF 共 2 页，已全部作为图片附上（第 2–3 张图）。");
+		expect(text).toContain("3. notes.md —— 文本，已按原文内联");
+		expect(text).toContain("4. clip.mp4 —— 视频，已附上。");
+		expect(text).toContain('<document name="notes.md" type="text/markdown">\n# hello\n</document>');
+		expect(text).toContain("look at these");
+	});
+
+	it("names an unsupported attachment instead of silently dropping it", async () => {
+		const { text, images } = await prepareUserFiles([
+			file("a.png", "image/png"),
+			file("bundle.zip", "application/zip"),
+		]);
+
+		expect(images).toHaveLength(1);
+		expect(text).toContain("2. bundle.zip —— application/zip —— 暂不支持这种附件，未附上。");
+	});
+
+	it("keeps the rest of the batch when one image fails to decode", async () => {
+		const flaky = (async (f: { mime: string; name: string }) => {
+			if (f.name === "corrupt.png") throw new Error("bad header");
+			return { mime: f.mime, image: { toString: () => "IMG" } };
+		}) as unknown as ReturnType<typeof makeImageProcessor>;
+
+		const [message] = await prepareMessagesWithFiles(
+			[
+				{
+					from: "user",
+					content: "look",
+					files: [
+						file("corrupt.png", "image/png"),
+						file("ok.png", "image/png"),
+						file("notes.txt", "text/plain", b64("still here")),
+					],
+				},
+			],
+			flaky,
+			true
+		);
+		const parts = message.content as { type: string; text?: string }[];
+		expect(parts.filter((p) => p.type === "image_url")).toHaveLength(1);
+		expect(parts[0].text).toContain("1. corrupt.png —— 图片 —— 无法解码：bad header");
+		expect(parts[0].text).toContain("2. ok.png —— 图片，第 1 张图。");
+		expect(parts[0].text).toContain("still here");
+	});
+
+	it("caps plain images at the per-request limit instead of letting the backend reject the turn", async () => {
+		const { text, images } = await prepareUserFiles(
+			Array.from({ length: 70 }, (_, i) => file(`p${i + 1}.png`, "image/png"))
+		);
+
+		expect(images).toHaveLength(64);
+		expect(text).toContain("64. p64.png —— 图片，第 64 张图。");
+		expect(text).toContain("65. p65.png —— 图片 —— 本轮共 70 张，单次请求最多 64 张");
+	});
+
+	it("reserves image slots for a PDF so a pile of screenshots can't starve it", async () => {
+		mockPdf(30);
+		const { text, images } = await prepareUserFiles([
+			...Array.from({ length: 60 }, (_, i) => file(`p${i + 1}.png`, "image/png")),
+			file("report.pdf", "application/pdf"),
+		]);
+
+		// 48 screenshots (64 minus the PDF reserve) + the 16 pages that fit.
+		expect(images).toHaveLength(64);
+		expect(text).toContain("已为其预留额度");
+		expect(text).toContain("只附上了前 16 页（第 49–64 张图）");
+	});
+
+	it("does not charge a video against the image budget", async () => {
+		mockPdf(60);
+		const { images, videos, text } = await prepareUserFiles([
+			file("clip.mp4", "video/mp4"),
+			file("report.pdf", "application/pdf"),
+		]);
+
+		// The video has its own vLLM counter, so the PDF still gets its full
+		// 48-page allowance rather than 47.
+		expect(videos).toHaveLength(1);
+		expect(images).toHaveLength(48);
+		expect(text).toContain("只附上了前 48 页（第 1–48 张图）");
+	});
+
+	it("reports a second video as dropped rather than sending it past the backend limit", async () => {
+		const { videos, text } = await prepareUserFiles([
+			file("a.mp4", "video/mp4"),
+			file("b.mp4", "video/mp4"),
+		]);
+
+		expect(videos).toHaveLength(1);
+		expect(text).toContain("2. b.mp4 —— 视频 —— 本轮共 2 个，单次请求最多 1 个，未附上。");
+	});
+
+	it("truncates an oversized text file and says so", async () => {
+		const { text } = await prepareUserFiles([
+			file("huge.txt", "text/plain", b64("x".repeat(200_050))),
+		]);
+
+		expect(text).toContain("原文 200050 字符");
+		expect(text).toContain("[……内容过长，此处截断]");
+		expect(text).not.toContain("x".repeat(200_001));
+	});
+
+	it("keeps a lone clean image manifest-free", async () => {
+		const { text, images } = await prepareUserFiles([file("only.png", "image/png")], {
+			content: "what is this",
+		});
+
+		expect(images).toHaveLength(1);
+		expect(text).toBe("what is this");
+	});
+
+	it("tells a text-only model what it cannot see, and still inlines the text file", async () => {
+		mockPdf(3);
+		const { text, parts } = await prepareUserFiles(
+			[
+				file("shot.png", "image/png"),
+				file("report.pdf", "application/pdf"),
+				file("clip.mp4", "video/mp4"),
+				file("notes.txt", "text/plain", b64("plain text survives")),
+			],
+			{ multimodal: false }
+		);
+
+		expect(parts).toHaveLength(0);
+		expect(text).toContain("1. shot.png —— 图片 —— 当前模型不支持图片输入，未附上。");
+		expect(text).toContain("2. report.pdf —— PDF —— 当前模型不支持图片输入，无法读取。");
+		expect(text).toContain("3. clip.mp4 —— 视频 —— 当前模型不支持视觉输入，无法读取。");
+		expect(text).toContain("plain text survives");
+	});
+
+	it("says a PDF could not be read instead of failing the turn", async () => {
+		pdfMock.failWith = "encrypted";
+		const { text, images } = await prepareUserFiles([
+			file("locked.pdf", "application/pdf"),
+			file("shot.png", "image/png"),
+		]);
+
+		expect(images).toHaveLength(1);
+		expect(text).toContain("1. locked.pdf —— PDF —— 无法读取：encrypted");
+		expect(text).toContain("2. shot.png —— 图片，第 1 张图。");
 	});
 });

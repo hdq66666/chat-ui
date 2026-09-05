@@ -2,6 +2,7 @@ import type { MessageFile } from "$lib/types/Message";
 import type { EndpointMessage } from "$lib/server/endpoints/endpoints";
 import type { OpenAI } from "openai";
 import { TEXT_MIME_ALLOWLIST } from "$lib/constants/mime";
+import { mimeMatchesAllowlist } from "$lib/utils/mimeMatch";
 import { stripThink } from "$lib/utils/stripThink";
 import { stripLoneSurrogates } from "./loneSurrogates";
 import type { makeImageProcessor } from "$lib/server/endpoints/images";
@@ -629,6 +630,70 @@ async function renderPdfPages(
 	}
 }
 
+/**
+ * 同时带了图片和 PDF 时，从图片额度里划给 PDF 的保底页数。
+ *
+ * 图片和 PDF 页在 vLLM 眼里是同一种东西，共用 image.count。先到先得的话，
+ * 一次拖进来的几十张截图会把同一条消息里的 PDF 挤成 0 页 —— 而用户既然
+ * 两样都附了，就是两样都想让模型看。所以 PDF 在场时给它留一份保底，
+ * 图片那边相应压到 MAX_IMAGES_PER_REQUEST - 这个值。
+ */
+const PDF_RESERVED_IMAGE_SLOTS = Number(process.env.PDF_RESERVED_IMAGE_SLOTS || 16);
+
+/**
+ * 单个文本附件内联的字符上限，超出的部分截断并在清单里说明。
+ * 上传本身只受 PUBLIC_MAX_UPLOAD_MB 限制（当前 50MB），一份体积合法的
+ * 日志足够单独撑爆任何上下文窗口，所以内联这一步必须自己有个上限。
+ */
+const MAX_TEXT_FILE_CHARS = Number(process.env.MAX_TEXT_FILE_CHARS || 200_000);
+
+/**
+ * 一轮里所有文本附件合计的字符上限。和单文件上限分开，是因为十个各自
+ * 合规的文件叠起来照样能把 HISTORY_BUDGET_CHARS 吃干净 —— 取的就是那个
+ * 数：附件最多占满一整轮历史的额度，不该比这更多。
+ */
+const MAX_TEXT_TOTAL_CHARS = Number(process.env.MAX_TEXT_TOTAL_CHARS || HISTORY_BUDGET_CHARS);
+
+type AttachmentKind = "image" | "pdf" | "video" | "text" | "unsupported";
+
+function classifyAttachment(file: MessageFile): AttachmentKind {
+	const mime = (file.mime || "").toLowerCase();
+	if (mime.startsWith("image/")) return "image";
+	if (mime === "application/pdf") return "pdf";
+	if (VIDEO_MIME_ALLOWLIST.includes(mime)) return "video";
+	if (mimeMatchesAllowlist(mime, TEXT_MIME_ALLOWLIST)) return "text";
+	return "unsupported";
+}
+
+/**
+ * 清单里的一条。degraded 标记「没能原样附上」—— 截断、超额、解不开、
+ * 模型不支持，都算。它只影响要不要打印清单，不影响内容。
+ */
+type AttachmentOutcome = { text: string; degraded: boolean };
+
+/** 文件名要塞进 <document name="..."> 和清单里，引号会把标签拆散。 */
+const safeName = (name: string) => name.replace(/["<>]/g, "'");
+
+const mb = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
+
+/**
+ * 把一条用户消息的全部附件变成模型能吃的东西：图片 / PDF 页 / 视频进
+ * content parts，文本内联进 <document>，另外附一份清单。
+ *
+ * 一条消息里各种格式混着来是常态（截图 + PDF + 一份日志），所以这里的
+ * 每一步都按「其余附件照常走」来写：
+ *
+ * - 额度是分类算的。图片和 PDF 页共用 vLLM 的 image.count，视频走自己的
+ *   video.count，文本走字符预算 —— 视频不该占掉 PDF 的页数，反过来也是。
+ * - 超额、超时、解码失败都不抛出。一张坏图不该让整轮对话失败，更不该
+ *   连带把同一条消息里的 PDF 和日志一起废掉。
+ * - 凡是没能原样附上的，都在清单里写清楚。模型不知道被截掉了什么，就会
+ *   拿半份文档当全份来回答。
+ *
+ * content parts 按 图片 → PDF 页 → 视频 分组排列，而不是用户附件的原始
+ * 顺序；清单里给每一份都标了它对应第几张图，映射关系由清单负责，模型
+ * 不需要靠位置去猜。
+ */
 async function prepareFiles(
 	imageProcessor: ReturnType<typeof makeImageProcessor>,
 	files: MessageFile[],
@@ -637,118 +702,222 @@ async function prepareFiles(
 	imageParts: MediaContentPart[];
 	textContent: string;
 }> {
-	const imageFiles = files.filter((file) => file.mime.startsWith("image/"));
-	const pdfFiles = files.filter((file) => (file.mime || "").toLowerCase() === "application/pdf");
-	const videoFiles = files.filter((file) =>
-		VIDEO_MIME_ALLOWLIST.includes((file.mime || "").toLowerCase())
-	);
-	const textFiles = files.filter((file) => {
-		const mime = (file.mime || "").toLowerCase();
-		const [fileType, fileSubtype] = mime.split("/");
-		return TEXT_MIME_ALLOWLIST.some((allowed) => {
-			const [type, subtype] = allowed.toLowerCase().split("/");
-			const typeOk = type === "*" || type === fileType;
-			const subOk = subtype === "*" || subtype === fileSubtype;
-			return typeOk && subOk;
-		});
-	});
+	const kinds = files.map(classifyAttachment);
+	const outcomes: AttachmentOutcome[] = files.map(() => ({ text: "", degraded: false }));
+	const indexesOf = (kind: AttachmentKind) =>
+		kinds.flatMap((k, i) => (k === kind ? [i] : [])) as number[];
 
-	let imageParts: MediaContentPart[] = [];
-	if (isMultimodal && imageFiles.length > 0) {
-		const processedFiles = await Promise.all(imageFiles.map(imageProcessor));
-		imageParts = processedFiles.map((file) => ({
-			type: "image_url" as const,
-			image_url: {
-				url: `data:${file.mime};base64,${file.image.toString("base64")}`,
-				detail: "auto",
-			},
-		}));
-	}
+	const imageIndexes = indexesOf("image");
+	const pdfIndexes = indexesOf("pdf");
+	const videoIndexes = indexesOf("video");
+	const textIndexes = indexesOf("text");
 
-	// 视频：原样透传，抽帧交给 vLLM。服务端按 --media-io-kwargs 里的
-	// fps / num_frames 采样（当前 2fps、最多 120 帧 = 60 秒），并按模型
-	// 自己的像素预算压分辨率，所以这里不需要、也不应该自己抽帧 —— 那会
-	// 丢掉时序编码和时间戳。
-	const videoNotes: string[] = [];
-	if (isMultimodal && videoFiles.length > 0) {
-		const accepted = videoFiles.slice(0, MAX_VIDEOS_PER_REQUEST);
-		for (const file of accepted) {
-			const bytes = Buffer.byteLength(file.value, "base64");
-			if (bytes > MAX_VIDEO_MB * 1024 * 1024) {
-				videoNotes.push(
-					`[视频 "${file.name}" 约 ${(bytes / 1024 / 1024).toFixed(1)}MB，` +
-						`超过单个视频 ${MAX_VIDEO_MB}MB 的上限，未附上。]`
-				);
-				continue;
+	const imageParts: MediaContentPart[] = [];
+	/** 已附上的图片张数。视频也放在 imageParts 里，但不算图片额度。 */
+	let imageCount = 0;
+
+	// ── 图片 ────────────────────────────────────────────────────────────
+	// 上限是硬的：超过 --limit-mm-per-prompt 的 image.count，vLLM 拒的是
+	// 整个请求，不是多出来的那几张。宁可少附几张并说明。
+	const imageCap =
+		pdfIndexes.length > 0
+			? Math.max(1, MAX_IMAGES_PER_REQUEST - PDF_RESERVED_IMAGE_SLOTS)
+			: MAX_IMAGES_PER_REQUEST;
+
+	if (!isMultimodal) {
+		for (const i of imageIndexes) {
+			outcomes[i] = { text: "图片 —— 当前模型不支持图片输入，未附上。", degraded: true };
+		}
+	} else if (imageIndexes.length > 0) {
+		const accepted = imageIndexes.slice(0, imageCap);
+		// allSettled：sharp 解不开某一张（坏文件、SVG、少见的编码）会抛，
+		// 用 all 的话这一抛就带走了同一条消息里的其他所有附件。
+		const processed = await Promise.allSettled(accepted.map((i) => imageProcessor(files[i])));
+		processed.forEach((result, n) => {
+			const i = accepted[n];
+			if (result.status === "rejected") {
+				const reason =
+					result.reason instanceof Error ? result.reason.message : String(result.reason);
+				outcomes[i] = { text: `图片 —— 无法解码：${reason}`, degraded: true };
+				return;
 			}
 			imageParts.push({
-				type: "video_url" as const,
-				video_url: { url: `data:${file.mime};base64,${file.value}` },
+				type: "image_url" as const,
+				image_url: {
+					url: `data:${result.value.mime};base64,${result.value.image.toString("base64")}`,
+					detail: "auto" as const,
+				},
 			});
+			imageCount += 1;
+			outcomes[i] = { text: `图片，第 ${imageCount} 张图。`, degraded: false };
+		});
+		for (const i of imageIndexes.slice(imageCap)) {
+			outcomes[i] = {
+				text:
+					`图片 —— 本轮共 ${imageIndexes.length} 张，单次请求最多 ${imageCap} 张` +
+					`${pdfIndexes.length > 0 ? `（另有 PDF，已为其预留额度）` : ""}，未附上。`,
+				degraded: true,
+			};
 		}
-		if (videoFiles.length > accepted.length) {
-			videoNotes.push(
-				`[本轮共 ${videoFiles.length} 个视频，单次请求最多 ${MAX_VIDEOS_PER_REQUEST} 个，` +
-					`仅附上第一个。其余请分多轮发送。]`
-			);
-		}
-	} else if (!isMultimodal && videoFiles.length > 0) {
-		videoNotes.push("[当前模型不支持视觉输入，无法读取视频附件。]");
 	}
 
-	// PDF：逐页渲染成图，接在用户自己贴的图后面。额度和图片共享
-	// （对 vLLM 来说它们都是 image），但另有 PDF 自己的页数上限，
-	// 免得一份长文档把用户贴的截图全挤掉。
-	const pdfNotes: string[] = [];
-	if (isMultimodal && pdfFiles.length > 0) {
-		let budget = Math.min(MAX_IMAGES_PER_REQUEST - imageParts.length, MAX_PDF_PAGES_PER_REQUEST);
-		for (const file of pdfFiles) {
-			const buf = Buffer.from(file.value, "base64");
-			const { urls, total, error, timedOut } = await renderPdfPages(buf, budget);
-			if (error) {
-				pdfNotes.push(`[无法读取 PDF "${file.name}"：${error}]`);
-				continue;
-			}
-			imageParts.push(
-				...urls.map((url) => ({
-					type: "image_url" as const,
-					image_url: { url, detail: "auto" as const },
-				}))
-			);
-			budget -= urls.length;
-			if (timedOut) {
-				pdfNotes.push(
-					`[PDF "${file.name}" 共 ${total} 页，内容过于复杂，渲染超过 ` +
-						`${Math.round(PDF_RENDER_TIMEOUT_MS / 1000)} 秒后停止，仅附上前 ${urls.length} 页。]`
-				);
-			} else {
-				pdfNotes.push(
-					total > urls.length
-						? `[PDF "${file.name}" 共 ${total} 页，因单次请求最多 ${MAX_IMAGES_PER_REQUEST} 张图、` +
-								`PDF 最多 ${MAX_PDF_PAGES_PER_REQUEST} 页，仅附上前 ${urls.length} 页。` +
-								`需要后面的内容请让用户拆分后重发。]`
-						: `[PDF "${file.name}" 共 ${total} 页，已全部作为图片附上。]`
-				);
-			}
+	// ── PDF ─────────────────────────────────────────────────────────────
+	// 逐页渲染成图，接在用户自己贴的图后面，吃的是剩下的图片额度。
+	let pdfBudget = Math.min(MAX_IMAGES_PER_REQUEST - imageCount, MAX_PDF_PAGES_PER_REQUEST);
+	for (const i of pdfIndexes) {
+		const file = files[i];
+		if (!isMultimodal) {
+			outcomes[i] = { text: "PDF —— 当前模型不支持图片输入，无法读取。", degraded: true };
+			continue;
 		}
-	} else if (!isMultimodal && pdfFiles.length > 0) {
-		pdfNotes.push("[当前模型不支持图片输入，无法读取 PDF 附件。]");
-	}
-
-	let textContent = "";
-	if (textFiles.length > 0) {
-		const textParts = await Promise.all(
-			textFiles.map(async (file) => {
-				const content = Buffer.from(file.value, "base64").toString("utf-8");
-				return `<document name="${file.name}" type="${file.mime}">\n${content}\n</document>`;
-			})
+		if (pdfBudget <= 0) {
+			outcomes[i] = {
+				text:
+					`PDF —— 单次请求最多 ${MAX_IMAGES_PER_REQUEST} 张图，额度已被本轮前面的` +
+					`附件用尽，一页都没能附上。请分多轮发送。`,
+				degraded: true,
+			};
+			continue;
+		}
+		const { urls, total, error, timedOut } = await renderPdfPages(
+			Buffer.from(file.value, "base64"),
+			pdfBudget
 		);
-		textContent = textParts.join("\n\n");
+		if (error) {
+			outcomes[i] = { text: `PDF —— 无法读取：${error}`, degraded: true };
+			continue;
+		}
+		if (urls.length === 0) {
+			outcomes[i] = { text: `PDF —— 共 ${total} 页，没有能渲染出来的页面。`, degraded: true };
+			continue;
+		}
+		const firstOrdinal = imageCount + 1;
+		imageParts.push(
+			...urls.map((url) => ({
+				type: "image_url" as const,
+				image_url: { url, detail: "auto" as const },
+			}))
+		);
+		imageCount += urls.length;
+		pdfBudget -= urls.length;
+		const range =
+			urls.length === 1 ? `第 ${firstOrdinal} 张图` : `第 ${firstOrdinal}–${imageCount} 张图`;
+		if (timedOut) {
+			outcomes[i] = {
+				text:
+					`PDF 共 ${total} 页，内容过于复杂，渲染超过 ` +
+					`${Math.round(PDF_RENDER_TIMEOUT_MS / 1000)} 秒后停止，只附上了前 ` +
+					`${urls.length} 页（${range}）。`,
+				degraded: true,
+			};
+		} else if (total > urls.length) {
+			outcomes[i] = {
+				text:
+					`PDF 共 ${total} 页，受单次请求 ${MAX_IMAGES_PER_REQUEST} 张图、` +
+					`PDF ${MAX_PDF_PAGES_PER_REQUEST} 页的上限所限，只附上了前 ${urls.length} 页` +
+					`（${range}）。需要后面的内容请让用户拆分后重发。`,
+				degraded: true,
+			};
+		} else {
+			outcomes[i] = {
+				text: `PDF 共 ${total} 页，已全部作为图片附上（${range}）。`,
+				degraded: false,
+			};
+		}
 	}
 
-	if (pdfNotes.length > 0 || videoNotes.length > 0) {
-		textContent = [textContent, ...videoNotes, ...pdfNotes].filter(Boolean).join("\n\n");
+	// ── 视频 ────────────────────────────────────────────────────────────
+	// 原样透传，抽帧交给 vLLM：服务端按 --media-io-kwargs 的 fps / num_frames
+	// 采样，再按模型的像素预算压分辨率。自己抽帧会丢掉时序编码和时间戳。
+	// 视频有自己的 video.count 额度，不占图片的。
+	let videoSlots = MAX_VIDEOS_PER_REQUEST;
+	for (const i of videoIndexes) {
+		const file = files[i];
+		if (!isMultimodal) {
+			outcomes[i] = { text: "视频 —— 当前模型不支持视觉输入，无法读取。", degraded: true };
+			continue;
+		}
+		if (videoSlots <= 0) {
+			outcomes[i] = {
+				text:
+					`视频 —— 本轮共 ${videoIndexes.length} 个，单次请求最多 ` +
+					`${MAX_VIDEOS_PER_REQUEST} 个，未附上。请分多轮发送。`,
+				degraded: true,
+			};
+			continue;
+		}
+		const bytes = Buffer.byteLength(file.value, "base64");
+		if (bytes > MAX_VIDEO_MB * 1024 * 1024) {
+			outcomes[i] = {
+				text: `视频 —— 约 ${mb(bytes)}MB，超过单个视频 ${MAX_VIDEO_MB}MB 的上限，未附上。`,
+				degraded: true,
+			};
+			continue;
+		}
+		imageParts.push({
+			type: "video_url" as const,
+			video_url: { url: `data:${file.mime};base64,${file.value}` },
+		});
+		videoSlots -= 1;
+		outcomes[i] = { text: "视频，已附上。", degraded: false };
 	}
+
+	// ── 文本 ────────────────────────────────────────────────────────────
+	const documents: string[] = [];
+	let textBudget = MAX_TEXT_TOTAL_CHARS;
+	for (const i of textIndexes) {
+		const file = files[i];
+		const raw = Buffer.from(file.value, "base64").toString("utf-8");
+		const allowance = Math.min(MAX_TEXT_FILE_CHARS, textBudget);
+		if (allowance <= 0) {
+			outcomes[i] = {
+				text:
+					`文本 —— 本轮文本附件合计已达 ${MAX_TEXT_TOTAL_CHARS} 字符上限，` +
+					`这一份（${raw.length} 字符）未附上。`,
+				degraded: true,
+			};
+			continue;
+		}
+		const truncated = raw.length > allowance;
+		const content = truncated ? raw.slice(0, allowance) : raw;
+		textBudget -= content.length;
+		documents.push(
+			`<document name="${safeName(file.name)}" type="${file.mime}">\n${content}` +
+				`${truncated ? "\n[……内容过长，此处截断]" : ""}\n</document>`
+		);
+		outcomes[i] = truncated
+			? {
+					text: `文本 —— 原文 ${raw.length} 字符，超出单份 ${allowance} 字符的上限，只内联了开头部分。`,
+					degraded: true,
+				}
+			: { text: "文本，已按原文内联在下方 <document> 里。", degraded: false };
+	}
+
+	// ── 其余格式 ────────────────────────────────────────────────────────
+	// 静默丢弃是最坏的处理：模型不知道用户附过东西，只会答非所问。
+	for (const i of indexesOf("unsupported")) {
+		outcomes[i] = {
+			text: `${files[i].mime || "未知类型"} —— 暂不支持这种附件，未附上。`,
+			degraded: true,
+		};
+	}
+
+	// ── 清单 ────────────────────────────────────────────────────────────
+	// 只有一个附件、而且原样附上了的时候，清单是纯噪音：那张图或那个
+	// <document> 本身已经说明了一切。PDF 和视频除外 —— 模型得知道自己
+	// 看到的这几张图其实是一份 N 页的文档。
+	const needsManifest =
+		files.length > 1 ||
+		kinds.some((k) => k === "pdf" || k === "video" || k === "unsupported") ||
+		outcomes.some((o) => o.degraded);
+
+	const manifest = needsManifest
+		? `<attachments>\n` +
+			files.map((file, i) => `${i + 1}. ${safeName(file.name)} —— ${outcomes[i].text}`).join("\n") +
+			`\n</attachments>`
+		: "";
+
+	const textContent = [manifest, ...documents].filter(Boolean).join("\n\n");
 
 	return { imageParts, textContent };
 }

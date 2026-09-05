@@ -25,47 +25,49 @@
 		onDragInner = $bindable(false),
 	}: Props = $props();
 
-	async function dropHandle(event: DragEvent) {
+	/**
+	 * 一次拖进来的一批文件里，格式往往是混的（几张截图 + 一份 PDF + 一份
+	 * 日志），后面还可能再拖第二批。所以这里既不清空已有的附件，也不因为
+	 * 其中一个不合规就把整批丢掉 —— 能收的照收，收不下的一次性说明白。
+	 */
+	function dropHandle(event: DragEvent) {
 		event.preventDefault();
-		if (!requireAuthUser() && event.dataTransfer && event.dataTransfer.items) {
-			// Use DataTransferItemList interface to access the file(s)
-			if (files.length > 0) {
-				files = [];
+		if (requireAuthUser() || !event.dataTransfer?.items) return;
+
+		const dropped = Array.from(event.dataTransfer.items)
+			.filter((item) => item.kind === "file")
+			.map((item) => item.getAsFile())
+			.filter((file): file is File => file !== null);
+
+		if (dropped.length === 0) return;
+
+		const accepted: File[] = [];
+		const rejected: string[] = [];
+
+		for (const file of dropped) {
+			// 用扩展名兜底的类型来判，浏览器给 HEIC 的 type 常常是空的。
+			const fileMime = resolveFileMime(file.name, file.type);
+			if (!mimeMatchesAllowlist(fileMime, mimeTypes)) {
+				rejected.push(`${file.name}（${fileMime || "类型未知"}，不支持的格式）`);
+			} else if (file.size > MAX_UPLOAD_BYTES) {
+				rejected.push(
+					`${file.name}（${(file.size / 1024 / 1024).toFixed(1)}MB，超过 ${MAX_UPLOAD_MB}MB）`
+				);
+			} else {
+				accepted.push(file);
 			}
-			if (event.dataTransfer.items[0].kind === "file") {
-				for (let i = 0; i < event.dataTransfer.items.length; i++) {
-					const file = event.dataTransfer.items[i].getAsFile();
+		}
 
-					if (file) {
-						// check if the file matches the mimeTypes
-						// else abort
-						// 用扩展名兜底的类型来判，浏览器给 HEIC 的 type 常常是空的。
-						const fileMime = resolveFileMime(file.name, file.type);
-						if (!mimeMatchesAllowlist(fileMime, mimeTypes)) {
-							setErrorMsg(
-								`Some file type not supported. Only allowed: ${mimeTypes.join(
-									", "
-								)}. Uploaded document is of type ${fileMime || "unknown"}`
-							);
-							files = [];
-							return;
-						}
+		if (accepted.length > 0) {
+			files = [...files, ...accepted];
+		}
 
-						// if file is bigger than the configured limit, abort
-						if (file.size > MAX_UPLOAD_BYTES) {
-							setErrorMsg(`Some file is too big. (${MAX_UPLOAD_MB}MB max)`);
-							files = [];
-							return;
-						}
+		onDrag = false;
 
-						// add the file to the files array
-						files = [...files, file];
-
-						// Tools removed: no settings update for document parser
-					}
-				}
-				onDrag = false;
-			}
+		if (rejected.length > 0) {
+			setErrorMsg(
+				`以下文件未添加：\n${rejected.join("\n")}\n\n` + `允许的格式：${mimeTypes.join(", ")}`
+			);
 		}
 	}
 

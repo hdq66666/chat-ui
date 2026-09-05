@@ -343,7 +343,10 @@
 			file2base64(file).then((value) => ({
 				type: "base64",
 				value,
-				mime: file.type,
+				// 和拖拽/粘贴那两条路，以及服务端的 conversation/[id] 用同一套
+				// 兜底：浏览器给 HEIC 的 File.type 常是空串，直接用它的话这张
+				// 图在编辑器里既不是图片也不是文本，只能落到无格式的卡片上。
+				mime: resolveFileMime(file.name, file.type),
 				name: file.name,
 			}))
 		)

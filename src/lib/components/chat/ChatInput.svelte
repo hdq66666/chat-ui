@@ -6,6 +6,7 @@
 	import { DropdownMenu } from "bits-ui";
 	import IconPlus from "~icons/lucide/plus";
 	import CarbonImage from "~icons/carbon/image";
+	import CarbonAttachment from "~icons/carbon/attachment";
 	import CarbonDocument from "~icons/carbon/document";
 	import CarbonUpload from "~icons/carbon/upload";
 	import CarbonLink from "~icons/carbon/link";
@@ -86,6 +87,15 @@
 		fileInputEl.setAttribute("accept", accept);
 		fileInputEl.click();
 		queueMicrotask(() => fileInputEl?.setAttribute("accept", allAccept));
+	}
+
+	/**
+	 * 一次对话里附件的格式常常是混的（截图 + PDF + 一份日志），而按类型
+	 * 分开的选择器一次只能选一类 —— 用户得开三次对话框、发三次。这条走
+	 * 全量 accept，一个对话框里把它们一起选完。
+	 */
+	function openFilePickerAll() {
+		openPickerWithAccept(mimeTypes.join(",") || TEXT_MIME_ALLOWLIST.join(","));
 	}
 
 	function openFilePickerText() {
@@ -309,6 +319,13 @@
 								interactOutsideBehavior="defer-otherwise-close"
 							>
 								{#if modelIsMultimodal}
+									<DropdownMenu.Item
+										class="flex h-9 items-center gap-1 rounded-md px-2 text-sm text-gray-700 select-none focus-visible:outline-hidden data-highlighted:bg-gray-100 sm:h-8 dark:text-gray-200 dark:data-highlighted:bg-white/10"
+										onSelect={() => openFilePickerAll()}
+									>
+										<CarbonAttachment class="size-4 opacity-90 dark:opacity-80" />
+										Add files (any type)
+									</DropdownMenu.Item>
 									<DropdownMenu.Item
 										class="flex h-9 items-center gap-1 rounded-md px-2 text-sm text-gray-700 select-none focus-visible:outline-hidden data-highlighted:bg-gray-100 sm:h-8 dark:text-gray-200 dark:data-highlighted:bg-white/10"
 										onSelect={() => openFilePickerImage()}
