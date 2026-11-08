@@ -1,7 +1,12 @@
 import { browser } from "$app/environment";
 import { base } from "$app/paths";
 import type { ReasoningEffort, StreamingMode } from "$lib/types/Settings";
-import type { ImageAspect, ImageComplexity, ImageSizeTier } from "$lib/imageGeneration";
+import type {
+	ImageAspect,
+	ImageComplexity,
+	ImageQuality,
+	ImageSizeTier,
+} from "$lib/imageGeneration";
 import { getContext, setContext } from "svelte";
 import { type Writable, writable, get } from "svelte/store";
 
@@ -22,6 +27,7 @@ type SettingsStore = {
 	imageSizeOverrides: Record<string, ImageSizeTier>;
 	imageAspectOverrides: Record<string, ImageAspect>;
 	imageComplexityOverrides: Record<string, ImageComplexity>;
+	imageQualityOverrides: Record<string, ImageQuality>;
 	recentlySaved: boolean;
 	streamingMode: StreamingMode;
 	directPaste: boolean;

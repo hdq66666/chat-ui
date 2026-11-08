@@ -137,6 +137,46 @@ describe("generateImage", () => {
 		expect(last.text).toContain("复杂度 low");
 	});
 
+	it("prefers the user's quality over OPENAI_IMAGE_QUALITY and notes it", async () => {
+		mocks.config.OPENAI_IMAGE_QUALITY = "low";
+		mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
+		const c = ctx({});
+		(c as unknown as { imageQuality: string }).imageQuality = "high";
+		const updates = await collect(c);
+		expect(JSON.parse(mocks.fetch.mock.calls[0][1].body).quality).toBe("high");
+		const last = updates[updates.length - 1] as { text: string };
+		expect(last.text).toContain("质量 high");
+	});
+
+	it("sends no quality when neither the user nor the server picked one", async () => {
+		mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
+		const updates = await collect(ctx({}));
+		expect(JSON.parse(mocks.fetch.mock.calls[0][1].body)).not.toHaveProperty("quality");
+		expect((updates[updates.length - 1] as { text: string }).text).not.toContain("质量");
+	});
+
+	it("ignores a stored quality value the API does not accept", async () => {
+		mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
+		const c = ctx({});
+		(c as unknown as { imageQuality: string }).imageQuality = "ultra";
+		await collect(c);
+		expect(JSON.parse(mocks.fetch.mock.calls[0][1].body)).not.toHaveProperty("quality");
+	});
+
+	it("sends the user's quality on edits too", async () => {
+		mocks.downloadFile.mockResolvedValue({
+			type: "base64",
+			value: PNG_B64,
+			mime: "image/png",
+			name: "x",
+		});
+		mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
+		const c = ctx({ files: [{ type: "hash", value: "sha-a", mime: "image/png", name: "a.png" }] });
+		(c as unknown as { imageQuality: string }).imageQuality = "medium";
+		await collect(c);
+		expect((mocks.fetch.mock.calls[0][1].body as FormData).get("quality")).toBe("medium");
+	});
+
 	it("sends complexity on edits too", async () => {
 		mocks.downloadFile.mockResolvedValue({
 			type: "base64",

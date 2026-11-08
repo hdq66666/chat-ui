@@ -709,6 +709,9 @@ export async function POST({ request, locals, params, getClientAddress }) {
 					imageComplexity: model.imageGeneration
 						? userSettings?.imageComplexityOverrides?.[model.id]
 						: undefined,
+					imageQuality: model.imageGeneration
+						? userSettings?.imageQualityOverrides?.[model.id]
+						: undefined,
 					locals,
 					abortController: ctrl,
 					generationId: effectiveGenerationId,

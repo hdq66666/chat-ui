@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
 	IMAGE_ASPECTS,
 	IMAGE_COMPLEXITIES,
+	IMAGE_QUALITIES,
+	isImageQuality,
+	imageOutputTokens,
+	sizeCostMultiplier,
+	qualityCostMultiplier,
+	formatCostMultiplier,
 	IMAGE_DIMENSIONS,
 	IMAGE_MAX_PIXELS,
 	IMAGE_SIZE_TIERS,
@@ -71,6 +77,35 @@ describe("image size tiers", () => {
 		expect(imageSizeViolation(1000, 1000)).not.toBeNull(); // not a multiple of 16
 		expect(imageSizeViolation(3840, 1024)).not.toBeNull(); // ratio > 3:1
 		expect(imageSizeViolation(512, 512)).not.toBeNull(); // too few pixels
+	});
+
+	it("offers the quality values GPT Image 2.6 accepts", () => {
+		// the cost calculator lists all five for 2.6; the API accepts xhigh and max too
+		expect(IMAGE_QUALITIES).toEqual(["low", "medium", "high", "xhigh", "max"]);
+		expect(isImageQuality("xhigh")).toBe(true);
+		expect(isImageQuality("auto")).toBe(false);
+		expect(isImageQuality("ultra")).toBe(false);
+		expect(isImageQuality(undefined)).toBe(false);
+	});
+
+	it("estimates cost multipliers from the official calculator's token table", () => {
+		// every size in the menu has a row
+		for (const tier of IMAGE_SIZE_TIERS) {
+			for (const aspect of IMAGE_ASPECTS) {
+				for (const q of IMAGE_QUALITIES)
+					expect(imageOutputTokens(tier, aspect, q)).toBeGreaterThan(0);
+			}
+		}
+		expect(imageOutputTokens("1K", "1:1", "low")).toBe(823);
+		expect(imageOutputTokens("4K", "16:9", "max")).toBe(13342);
+		// no quality picked (auto) is estimated as medium
+		expect(imageOutputTokens("2K", "1:1", undefined)).toBe(2944);
+		expect(formatCostMultiplier(sizeCostMultiplier("4K", "1:1", undefined) ?? 0)).toBe("3.4×");
+		expect(formatCostMultiplier(sizeCostMultiplier("4K", "16:9", "medium") ?? 0)).toBe("3.1×");
+		expect(sizeCostMultiplier("1K", "3:2", "high")).toBe(1);
+		expect(formatCostMultiplier(qualityCostMultiplier("high", "1K", "1:1") ?? 0)).toBe("2.1×");
+		expect(formatCostMultiplier(qualityCostMultiplier("max", "1K", "1:1") ?? 0)).toBe("8.5×");
+		expect(formatCostMultiplier(2)).toBe("2×");
 	});
 
 	it("recognises only the documented complexity values", () => {

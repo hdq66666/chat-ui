@@ -6,11 +6,15 @@
 	import {
 		IMAGE_ASPECTS,
 		IMAGE_COMPLEXITIES,
+		IMAGE_QUALITIES,
 		IMAGE_SIZE_TIERS,
-		IMAGE_STABLE_MAX_PIXELS,
+		formatCostMultiplier,
+		qualityCostMultiplier,
 		resolveImageDimensions,
+		sizeCostMultiplier,
 		type ImageAspect,
 		type ImageComplexity,
+		type ImageQuality,
 		type ImageSizeTier,
 	} from "$lib/imageGeneration";
 
@@ -30,6 +34,12 @@
 	);
 
 	let complexity = $derived($settings.imageComplexityOverrides?.[modelId]);
+	let quality = $derived($settings.imageQualityOverrides?.[modelId]);
+
+	/** Shown after size and aspect on the trigger, only for what the user changed from Default. */
+	let extras = $derived(
+		[quality ? `Q ${quality}` : "", complexity ? `C ${complexity}` : ""].filter(Boolean)
+	);
 
 	// Persist immediately so the next message uses the new size (skips the setSettings debounce).
 	function setTier(value: ImageSizeTier) {
@@ -51,19 +61,45 @@
 		settings.instantSet({ imageComplexityOverrides: next });
 	}
 
+	function setQuality(value: ImageQuality | undefined) {
+		const next = { ...($settings.imageQualityOverrides ?? {}) };
+		if (value === undefined) delete next[modelId];
+		else next[modelId] = value;
+		settings.instantSet({ imageQualityOverrides: next });
+	}
+
+	const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+	const QUALITY_OPTIONS: { value: ImageQuality | undefined; label: string }[] = [
+		{ value: undefined, label: "Default" },
+		...IMAGE_QUALITIES.map((q) => ({ value: q, label: q === "xhigh" ? "XHigh" : capitalize(q) })),
+	];
+
+	/** Tiers and qualities that cost noticeably more get a warning with the multiplier. */
+	const WARN_TIERS: readonly ImageSizeTier[] = ["4K"];
+	const WARN_QUALITIES: readonly ImageQuality[] = ["high", "xhigh", "max"];
+
+	// Multipliers follow the official cost calculator, at the size, aspect and quality picked now.
+	function tierWarning(tier: ImageSizeTier) {
+		if (!WARN_TIERS.includes(tier)) return undefined;
+		const m = sizeCostMultiplier(tier, dims.aspect, quality);
+		return m ? formatCostMultiplier(m) : undefined;
+	}
+
+	function qualityWarning(value: ImageQuality | undefined) {
+		if (!value || !WARN_QUALITIES.includes(value)) return undefined;
+		const m = qualityCostMultiplier(value, dims.tier, dims.aspect);
+		return m ? formatCostMultiplier(m) : undefined;
+	}
+
 	const COMPLEXITY_OPTIONS: { value: ImageComplexity | undefined; label: string }[] = [
 		{ value: undefined, label: "Default" },
-		...IMAGE_COMPLEXITIES.map((c) => ({ value: c, label: c.charAt(0).toUpperCase() + c.slice(1) })),
+		...IMAGE_COMPLEXITIES.map((c) => ({ value: c, label: capitalize(c) })),
 	];
 
 	function pixels(tier: ImageSizeTier, aspect: ImageAspect) {
 		const d = resolveImageDimensions(tier, aspect);
 		return `${d.width}×${d.height}`;
-	}
-
-	function experimental(tier: ImageSizeTier, aspect: ImageAspect) {
-		const d = resolveImageDimensions(tier, aspect);
-		return d.width * d.height > IMAGE_STABLE_MAX_PIXELS;
 	}
 
 	const itemClass =
@@ -75,14 +111,16 @@
 	<DropdownMenu.Trigger
 		class="inline-flex items-center gap-1 hover:underline"
 		aria-label="Select image size"
-		title="{dims.width}×{dims.height}{complexity ? `, complexity ${complexity}` : ''}"
+		title="{dims.width}×{dims.height}{quality ? `, quality ${quality}` : ''}{complexity
+			? `, complexity ${complexity}`
+			: ''}"
 	>
-		Size: {dims.tier} · {dims.aspect}{complexity ? ` · ${complexity}` : ""}
+		Size: {dims.tier} · {dims.aspect}{extras.length ? ` · ${extras.join(" · ")}` : ""}
 		<CarbonCaretDown class="-ml-0.5 text-xxs" />
 	</DropdownMenu.Trigger>
 	<DropdownMenu.Portal>
 		<DropdownMenu.Content
-			class="z-50 min-w-48 rounded-xl border border-gray-200 bg-white/95 p-1 text-gray-800 shadow-lg backdrop-blur-sm dark:border-gray-700/60 dark:bg-gray-800/95 dark:text-gray-100"
+			class="z-50 min-w-56 rounded-xl border border-gray-200 bg-white/95 p-1 text-gray-800 shadow-lg backdrop-blur-sm dark:border-gray-700/60 dark:bg-gray-800/95 dark:text-gray-100"
 			side="top"
 			align="end"
 			sideOffset={6}
@@ -93,7 +131,14 @@
 					<DropdownMenu.Item class={itemClass} closeOnSelect={false} onSelect={() => setTier(tier)}>
 						<span>{tier}</span>
 						<span class="ml-auto text-xs text-gray-500 tabular-nums dark:text-gray-400">
-							{pixels(tier, dims.aspect)}{experimental(tier, dims.aspect) ? " · beta" : ""}
+							{pixels(tier, dims.aspect)}
+							{#if tierWarning(tier)}
+								<span
+									class="ml-1 text-amber-600 dark:text-amber-400"
+									title="About {tierWarning(tier)} the cost of 1K at this aspect ratio and quality"
+									>⚠️ {tierWarning(tier)} cost</span
+								>
+							{/if}
 						</span>
 						{#if dims.tier === tier}
 							<LucideCheck class="size-4 text-gray-500" />
@@ -114,6 +159,36 @@
 					>
 						<span>{aspect}</span>
 						{#if dims.aspect === aspect}
+							<LucideCheck class="size-4 text-gray-500" />
+						{:else}
+							<span class="size-4"></span>
+						{/if}
+					</DropdownMenu.Item>
+				{/each}
+			</DropdownMenu.Group>
+			<DropdownMenu.Separator class="my-1 h-px bg-gray-200 dark:bg-gray-700/60" />
+			<DropdownMenu.Group>
+				<DropdownMenu.GroupHeading
+					class={headingClass}
+					title="Rendering quality. Higher is slower and costs more. Default: the server setting, otherwise the API default (auto)."
+				>
+					Quality
+				</DropdownMenu.GroupHeading>
+				{#each QUALITY_OPTIONS as opt (opt.label)}
+					<DropdownMenu.Item
+						class={itemClass}
+						closeOnSelect={false}
+						onSelect={() => setQuality(opt.value)}
+					>
+						<span>{opt.label}</span>
+						{#if qualityWarning(opt.value)}
+							<span
+								class="ml-auto text-xs text-amber-600 tabular-nums dark:text-amber-400"
+								title="About {qualityWarning(opt.value)} the cost of Low at this size"
+								>⚠️ {qualityWarning(opt.value)} cost</span
+							>
+						{/if}
+						{#if quality === opt.value}
 							<LucideCheck class="size-4 text-gray-500" />
 						{:else}
 							<span class="size-4"></span>

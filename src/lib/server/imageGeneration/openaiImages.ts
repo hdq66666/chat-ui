@@ -21,6 +21,7 @@ import {
 	IMAGE_STABLE_MAX_PIXELS,
 	imageSizeViolation,
 	isImageComplexity,
+	isImageQuality,
 	CHAIN_EDIT_PREAMBLE,
 	IMAGE_PROMPT_MAX_CHARS,
 	findChainSource,
@@ -99,6 +100,11 @@ class ImageApiError extends Error {
 /** 用户在菜单里选的优先，其次 OPENAI_IMAGE_COMPLEXITY；都没有就不发，用 API 默认（high）。 */
 function effectiveComplexity(ctx: TextGenerationContext): string | undefined {
 	return isImageComplexity(ctx.imageComplexity) ? ctx.imageComplexity : imageComplexity();
+}
+
+/** 用户在尺寸菜单里选的质量优先，其次 OPENAI_IMAGE_QUALITY，都没有就不发（API 默认 auto）。 */
+function effectiveQuality(ctx: TextGenerationContext): string | undefined {
+	return isImageQuality(ctx.imageQuality) ? ctx.imageQuality : quality();
 }
 
 type ImageMode = "generate" | "edit" | "chain";
@@ -319,7 +325,7 @@ async function callImagesApi(
 			: ctx.abortController.signal;
 	// 可选参数只在配置了合法值时才发，否则用 API 默认值（quality/moderation auto，complexity high）
 	const optional: Record<string, string> = {};
-	const q = quality();
+	const q = effectiveQuality(ctx);
 	if (q) optional.quality = q;
 	const complexity = effectiveComplexity(ctx);
 	if (complexity) optional.complexity = complexity;
@@ -532,11 +538,13 @@ export async function* generateImage(
 			}
 		}
 		const complexity = effectiveComplexity(ctx);
+		const renderQuality = effectiveQuality(ctx);
 		logger.info(
 			{
 				model: ctx.model.id,
 				mode,
 				size: dims.size,
+				quality: renderQuality,
 				complexity,
 				inputs: inputs.length,
 				markup: Boolean(markup),
@@ -593,6 +601,7 @@ export async function* generateImage(
 					: "已生成";
 		const notes = [
 			`${verb}：${dims.tier} ${dims.aspect}（${outSize}）` +
+				`${renderQuality ? `，质量 ${renderQuality}` : ""}` +
 				`${complexity ? `，复杂度 ${complexity}` : ""}，${seconds} 秒。`,
 		];
 		if (chain && dims.aspect !== resolveImageDimensions(ctx.imageSize, ctx.imageAspect).aspect) {

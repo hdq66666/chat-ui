@@ -1,6 +1,11 @@
 import { collections } from "$lib/server/database";
 import { z } from "zod";
-import { IMAGE_ASPECTS, IMAGE_COMPLEXITIES, IMAGE_SIZE_TIERS } from "$lib/imageGeneration";
+import {
+	IMAGE_ASPECTS,
+	IMAGE_COMPLEXITIES,
+	IMAGE_QUALITIES,
+	IMAGE_SIZE_TIERS,
+} from "$lib/imageGeneration";
 import { authCondition } from "$lib/server/auth";
 import { config } from "$lib/server/config";
 import { DEFAULT_SETTINGS, type SettingsEditable } from "$lib/types/Settings";
@@ -23,6 +28,7 @@ const settingsSchema = z.object({
 	imageSizeOverrides: z.record(z.enum(IMAGE_SIZE_TIERS)).default({}),
 	imageAspectOverrides: z.record(z.enum(IMAGE_ASPECTS)).default({}),
 	imageComplexityOverrides: z.record(z.enum(IMAGE_COMPLEXITIES)).default({}),
+	imageQualityOverrides: z.record(z.enum(IMAGE_QUALITIES)).default({}),
 	streamingMode: z.enum(["raw", "smooth"]).optional(),
 	directPaste: z.boolean().default(false),
 	hapticsEnabled: z.boolean().default(true),

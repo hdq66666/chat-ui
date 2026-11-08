@@ -1,7 +1,12 @@
 import { defaultModel } from "$lib/server/models";
 import type { Timestamps } from "./Timestamps";
 import type { User } from "./User";
-import type { ImageAspect, ImageComplexity, ImageSizeTier } from "$lib/imageGeneration";
+import type {
+	ImageAspect,
+	ImageComplexity,
+	ImageQuality,
+	ImageSizeTier,
+} from "$lib/imageGeneration";
 
 export type StreamingMode = "raw" | "smooth";
 export type ReasoningEffort = "low" | "medium" | "high";
@@ -75,6 +80,8 @@ export interface Settings extends Timestamps {
 	imageAspectOverrides?: Record<string, ImageAspect>;
 	/** Per image-generation model: complexity. Missing = server/API default. */
 	imageComplexityOverrides?: Record<string, ImageComplexity>;
+	/** Per image-generation model: quality. Missing = server setting, otherwise API default (auto). */
+	imageQualityOverrides?: Record<string, ImageQuality>;
 
 	/**
 	 * Preferred assistant output behavior in the chat UI.
@@ -115,6 +122,7 @@ export const DEFAULT_SETTINGS = {
 	imageSizeOverrides: {},
 	imageAspectOverrides: {},
 	imageComplexityOverrides: {},
+	imageQualityOverrides: {},
 	streamingMode: "smooth",
 	directPaste: false,
 	hapticsEnabled: true,

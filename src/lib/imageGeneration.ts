@@ -24,6 +24,14 @@ export type ImageAspect = (typeof IMAGE_ASPECTS)[number];
 export const IMAGE_COMPLEXITIES = ["low", "medium", "high"] as const;
 export type ImageComplexity = (typeof IMAGE_COMPLEXITIES)[number];
 
+/**
+ * 渲染质量。官方费用计算器给 2.6 列了 low / medium / high / xhigh / max；
+ * API 对 2.6 也接受 xhigh、max（报错文案里的列表只写到 high，是旧的）。
+ * 不选就是 auto，由服务端配置或 API 决定。
+ */
+export const IMAGE_QUALITIES = ["low", "medium", "high", "xhigh", "max"] as const;
+export type ImageQuality = (typeof IMAGE_QUALITIES)[number];
+
 export const DEFAULT_IMAGE_SIZE_TIER: ImageSizeTier = "1K";
 export const DEFAULT_IMAGE_ASPECT: ImageAspect = "1:1";
 
@@ -76,6 +84,74 @@ export function isImageSizeTier(value: unknown): value is ImageSizeTier {
 
 export function isImageComplexity(value: unknown): value is ImageComplexity {
 	return typeof value === "string" && (IMAGE_COMPLEXITIES as readonly string[]).includes(value);
+}
+
+export function isImageQuality(value: unknown): value is ImageQuality {
+	return typeof value === "string" && (IMAGE_QUALITIES as readonly string[]).includes(value);
+}
+
+/**
+ * 每张图的输出 token（GPT Image 2.6 Sunburst / Flare 共用），抄自官方 Image generation 指南
+ * "Calculating costs" 里的费用计算器（2026-11-08），按 $30 / 百万输出 token 计费。
+ * 生产日志里 auto 质量的实际用量和 medium / high 这两列对得上。
+ * 只用来在菜单里提示相对费用，不参与请求。
+ */
+const OUTPUT_TOKENS: Record<string, readonly [number, number, number, number, number]> = {
+	"1024x1024": [823, 1449, 1756, 3122, 7024],
+	"1536x1024": [664, 1132, 1372, 2459, 5488],
+	"1024x1536": [664, 1132, 1372, 2459, 5488],
+	"1536x864": [504, 924, 1078, 1917, 4312],
+	"864x1536": [504, 924, 1078, 1917, 4312],
+	"2048x2048": [1667, 2944, 3568, 6343, 14272],
+	"2048x1360": [886, 1518, 1838, 3216, 7351],
+	"1360x2048": [886, 1518, 1838, 3216, 7351],
+	"2048x1152": [659, 1211, 1413, 2511, 5650],
+	"1152x2048": [659, 1211, 1413, 2511, 5650],
+	"2880x2880": [2768, 4894, 5930, 10542, 23719],
+	"3504x2336": [1886, 3227, 3912, 7008, 15645],
+	"2336x3504": [1886, 3227, 3912, 7008, 15645],
+	"3840x2160": [1558, 2855, 3336, 5930, 13342],
+	"2160x3840": [1558, 2855, 3336, 5930, 13342],
+};
+
+/** 没选质量（auto）时按 medium 估：生产日志里 auto 多数落在 medium。 */
+const ESTIMATE_QUALITY: ImageQuality = "medium";
+
+export function imageOutputTokens(
+	tier: ImageSizeTier,
+	aspect: ImageAspect,
+	quality: ImageQuality | undefined
+): number | undefined {
+	const d = resolveImageDimensions(tier, aspect);
+	const row = OUTPUT_TOKENS[d.size];
+	return row?.[IMAGE_QUALITIES.indexOf(quality ?? ESTIMATE_QUALITY)];
+}
+
+/** 这个尺寸档的费用是同比例、同质量 1K 的几倍。 */
+export function sizeCostMultiplier(
+	tier: ImageSizeTier,
+	aspect: ImageAspect,
+	quality: ImageQuality | undefined
+): number | undefined {
+	const here = imageOutputTokens(tier, aspect, quality);
+	const base = imageOutputTokens("1K", aspect, quality);
+	return here && base ? here / base : undefined;
+}
+
+/** 这个质量档的费用是同尺寸 low 的几倍。 */
+export function qualityCostMultiplier(
+	quality: ImageQuality,
+	tier: ImageSizeTier,
+	aspect: ImageAspect
+): number | undefined {
+	const here = imageOutputTokens(tier, aspect, quality);
+	const base = imageOutputTokens(tier, aspect, "low");
+	return here && base ? here / base : undefined;
+}
+
+/** 倍数的显示：1 位小数，整数不带 .0。 */
+export function formatCostMultiplier(multiplier: number): string {
+	return `${Number(multiplier.toFixed(1))}×`;
 }
 
 export function isImageAspect(value: unknown): value is ImageAspect {

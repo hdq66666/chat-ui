@@ -3,7 +3,12 @@ import type { Endpoint } from "../endpoints/endpoints";
 import type { Conversation } from "$lib/types/Conversation";
 import type { Message } from "$lib/types/Message";
 import type { Assistant } from "$lib/types/Assistant";
-import type { ImageAspect, ImageComplexity, ImageSizeTier } from "$lib/imageGeneration";
+import type {
+	ImageAspect,
+	ImageComplexity,
+	ImageQuality,
+	ImageSizeTier,
+} from "$lib/imageGeneration";
 
 export interface TextGenerationContext {
 	model: ProcessedModel;
@@ -32,6 +37,8 @@ export interface TextGenerationContext {
 	imageAspect?: ImageAspect;
 	/** Image models only: complexity the user picked; unset = OPENAI_IMAGE_COMPLEXITY or API default */
 	imageComplexity?: ImageComplexity;
+	/** Image models only: quality the user picked; unset = OPENAI_IMAGE_QUALITY or API default (auto) */
+	imageQuality?: ImageQuality;
 	locals: App.Locals | undefined;
 	abortController: AbortController;
 	/** Also identifies the audience for an MCP elicitation raised mid tool call. */
