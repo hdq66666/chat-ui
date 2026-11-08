@@ -37,6 +37,14 @@
 	import ChatMessage from "./ChatMessage.svelte";
 	import ThinkingEffortChip from "./ThinkingEffortChip.svelte";
 	import ImageSizeChip from "./ImageSizeChip.svelte";
+	import ScreenshotAnnotationModal from "./ScreenshotAnnotationModal.svelte";
+	import { pngDataUrlToFile } from "$lib/utils/artifactCapture";
+	import {
+		formatMarkupNotes,
+		isMarkupFileName,
+		markupFileNameFor,
+		markupTargetName,
+	} from "$lib/imageGeneration";
 	import ScrollToBottomBtn from "../ScrollToBottomBtn.svelte";
 	import ScrollToPreviousBtn from "../ScrollToPreviousBtn.svelte";
 	import { browser } from "$app/environment";
@@ -338,6 +346,36 @@
 			showRouterDetails = true;
 		}, 500);
 	});
+
+	/** Pending image being marked up for a GPT Image markup-guided edit */
+	let markupTarget = $state<{ name: string; dataUrl: string } | null>(null);
+
+	// The API edits the first image and takes the markup layer separately, so the
+	// marked image moves to the front and one layer (the latest) is kept.
+	function applyMarkup(layerDataUrl: string, notes: string[]) {
+		const target = markupTarget;
+		markupTarget = null;
+		if (!target) return;
+		const images = files.filter((f) => !isMarkupFileName(f.name));
+		const i = images.findIndex((f) => f.name === target.name);
+		if (i < 0) return;
+		files = [
+			images[i],
+			...images.filter((_, j) => j !== i),
+			pngDataUrlToFile(layerDataUrl, markupFileNameFor(target.name)),
+		];
+		const text = formatMarkupNotes(notes);
+		if (text) draft = draft.trim() ? `${draft}\n\n${text}` : text;
+	}
+
+	function removePendingFile(index: number) {
+		const removed = files[index];
+		files = files.filter(
+			(f, i) =>
+				i !== index &&
+				!(removed && isMarkupFileName(f.name) && markupTargetName(f.name) === removed.name)
+		);
+	}
 
 	let sources = $derived(
 		files?.map<Promise<MessageFile>>((file) =>
@@ -959,9 +997,10 @@
 						{#await source then src}
 							<UploadedFile
 								file={src}
-								onclose={() => {
-									files = files.filter((_, i) => i !== index);
-								}}
+								onclose={() => removePendingFile(index)}
+								onannotate={currentModel.imageGeneration
+									? (dataUrl) => (markupTarget = { name: src.name, dataUrl })
+									: undefined}
 							/>
 						{/await}
 					{/each}
@@ -1224,6 +1263,17 @@
 			</div>
 		</div>
 	</div>
+
+	{#if markupTarget}
+		<ScreenshotAnnotationModal
+			dataUrl={markupTarget.dataUrl}
+			exportMode="overlay"
+			title="Mark up the image to edit"
+			confirmLabel="Use as markup"
+			onconfirm={applyMarkup}
+			onclose={() => (markupTarget = null)}
+		/>
+	{/if}
 
 	<ArtifactPanel
 		registry={artifactRegistry}

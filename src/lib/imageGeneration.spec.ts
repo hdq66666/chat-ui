@@ -6,7 +6,11 @@ import {
 	IMAGE_MAX_PIXELS,
 	IMAGE_SIZE_TIERS,
 	imageSizeViolation,
+	formatMarkupNotes,
 	isImageComplexity,
+	isMarkupFileName,
+	markupFileNameFor,
+	markupTargetName,
 	resolveImageDimensions,
 } from "./imageGeneration";
 
@@ -64,6 +68,21 @@ describe("image size tiers", () => {
 		expect(isImageComplexity("medium")).toBe(true);
 		expect(isImageComplexity("max")).toBe(false);
 		expect(isImageComplexity(undefined)).toBe(false);
+	});
+
+	it("names markup layers after their image and reads the target back", () => {
+		const name = markupFileNameFor("IMG_0001.HEIC");
+		expect(isMarkupFileName(name)).toBe(true);
+		expect(markupTargetName(name)).toBe("IMG_0001.HEIC");
+		expect(isMarkupFileName("IMG_0001.HEIC")).toBe(false);
+		expect(markupTargetName("photo.png")).toBeUndefined();
+	});
+
+	it("formats markup notes numbered like the badges", () => {
+		expect(formatMarkupNotes(["make it blue", "  ", "remove\nthis"])).toBe(
+			"Numbered marks on the markup layer:\n1. make it blue\n2. remove\n   this"
+		);
+		expect(formatMarkupNotes([" "])).toBeUndefined();
 	});
 
 	it("falls back to 1K 1:1 for missing or unknown values", () => {

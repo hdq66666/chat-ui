@@ -42,9 +42,24 @@
 		/** Called with the final (annotated) PNG data URL and the numbered note texts */
 		onconfirm: (dataUrl: string, notes: string[]) => void;
 		onclose: () => void;
+		/**
+		 * "flatten" (default): export the image with the marks baked in.
+		 * "overlay": export only the marks on a transparent canvas of the same size,
+		 * for GPT Image markup-guided edits, which take the layer separately.
+		 */
+		exportMode?: "flatten" | "overlay";
+		title?: string;
+		confirmLabel?: string;
 	}
 
-	let { dataUrl, onconfirm, onclose }: Props = $props();
+	let {
+		dataUrl,
+		onconfirm,
+		onclose,
+		exportMode = "flatten",
+		title = "Annotate screenshot",
+		confirmLabel = "Add to chat",
+	}: Props = $props();
 
 	const COLORS = ["#ef4444", "#f59e0b", "#3b82f6", "#22c55e"];
 	// Comments keep one fixed identity (blue badge, dashed region) so they read
@@ -494,9 +509,21 @@
 		comments = comments.filter((comment) => comment.note.trim());
 		redraw();
 		onconfirm(
-			canvasEl.toDataURL("image/png"),
+			exportMode === "overlay" ? exportOverlay(canvasEl) : canvasEl.toDataURL("image/png"),
 			comments.map((comment) => comment.note.trim())
 		);
+	}
+
+	/** Same marks, same pixel size, no image underneath. */
+	function exportOverlay(source: HTMLCanvasElement): string {
+		const layer = document.createElement("canvas");
+		layer.width = source.width;
+		layer.height = source.height;
+		const ctx = layer.getContext("2d");
+		if (!ctx) return source.toDataURL("image/png");
+		for (const annotation of annotations) drawAnnotation(ctx, annotation);
+		comments.forEach((comment, i) => drawCommentMarker(ctx, comment, String(i + 1)));
+		return layer.toDataURL("image/png");
 	}
 
 	// Focus when the token is set, and again whenever it changes: the popover
@@ -638,7 +665,7 @@
 	<div class="flex flex-col gap-2.5 p-2.5 sm:gap-3 sm:p-4">
 		<div class="flex flex-wrap items-center gap-x-1.5 gap-y-2 sm:gap-2">
 			<h2 class="mr-auto text-sm font-semibold text-gray-800 dark:text-gray-200">
-				Annotate screenshot
+				{title}
 			</h2>
 
 			<div class="flex items-center rounded-lg bg-gray-100 p-0.5 dark:bg-gray-800">
@@ -705,7 +732,7 @@
 			class="relative flex min-h-40 items-center justify-center overflow-hidden rounded-lg border border-gray-200 bg-gray-50 max-sm:-mx-2.5 max-sm:rounded-none max-sm:border-x-0 dark:border-gray-700 dark:bg-gray-950"
 		>
 			{#if loadFailed}
-				<p class="p-8 text-sm text-gray-500">Could not load the screenshot.</p>
+				<p class="p-8 text-sm text-gray-500">Could not load the image.</p>
 			{:else if !image}
 				<EosIconsLoading class="text-2xl text-gray-400" />
 			{:else}
@@ -810,10 +837,11 @@
 			<button
 				type="button"
 				class="inline-flex items-center gap-1.5 rounded-xl border border-gray-900 bg-gray-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-black focus:ring-2 focus:ring-gray-400 focus:ring-offset-2 focus:outline-hidden disabled:opacity-60 dark:border-gray-100 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white dark:focus:ring-offset-gray-800"
-				disabled={!image}
+				disabled={!image ||
+					(exportMode === "overlay" && annotations.length === 0 && comments.length === 0)}
 				onclick={confirm}
 			>
-				Add to chat
+				{confirmLabel}
 			</button>
 		</div>
 	</div>

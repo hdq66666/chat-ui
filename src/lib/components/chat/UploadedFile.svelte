@@ -12,6 +12,8 @@
 	import { base } from "$app/paths";
 	import { TEXT_MIME_ALLOWLIST } from "$lib/constants/mime";
 	import { decodeHeicToDataUrl } from "$lib/utils/heicPreview";
+	import { isMarkupFileName } from "$lib/imageGeneration";
+	import LucidePencil from "~icons/lucide/pencil";
 
 	interface Props {
 		file: MessageFile;
@@ -19,9 +21,13 @@
 		onclose?: () => void;
 		/** Generated images: show a large preview at the image's own aspect ratio */
 		large?: boolean;
+		/** Pending image attachments for image models: open the markup editor on this image */
+		onannotate?: (dataUrl: string) => void;
 	}
 
-	let { file, canClose = true, onclose, large = false }: Props = $props();
+	let { file, canClose = true, onclose, large = false, onannotate }: Props = $props();
+
+	let isMarkup = $derived(isMarkupFileName(file.name));
 
 	let showModal = $state(false);
 
@@ -318,6 +324,27 @@
 					<dt class="text-xs text-gray-400">{file.mime}</dt>
 				</dl>
 			</div>
+		{/if}
+		{#if isMarkup}
+			<span
+				class="pointer-events-none absolute bottom-1 left-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-medium text-white"
+				>Markup</span
+			>
+		{/if}
+		{#if onannotate && !isMarkup && (heicPreview || (isDisplayableImage(file.mime) && file.type === "base64"))}
+			<button
+				class="absolute -top-2 -left-2 z-10 grid size-6 place-items-center rounded-full border bg-black group-hover:visible dark:border-gray-700"
+				class:invisible={navigator.maxTouchPoints === 0}
+				title="Mark up this image for the edit"
+				aria-label="Mark up this image"
+				onclick={(e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					onannotate?.(heicPreview ?? `data:${file.mime};base64,${file.value}`);
+				}}
+			>
+				<LucidePencil class="text-xs text-white" />
+			</button>
 		{/if}
 		<!-- add a button on top that removes the image -->
 		{#if canClose}

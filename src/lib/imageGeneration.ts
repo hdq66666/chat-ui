@@ -91,3 +91,40 @@ export function resolveImageDimensions(
 	const [width, height] = IMAGE_DIMENSIONS[t][a];
 	return { tier: t, aspect: a, width, height, size: `${width}x${height}` };
 }
+
+/**
+ * 标记引导编辑（GPT Image 2.6 的 markup）：在被编辑的图上画圈、箭头、编号，
+ * 作为一张同尺寸的透明 PNG 图层随 /images/edits 的 `markup` 字段发送，原图不压平。
+ *
+ * 前端把图层作为普通 PNG 附件发出，用保留的文件名前缀标出它是图层、以及画在哪张图上：
+ * `chatui-markup-<被标记图片的文件名>.png`。服务端据此把它从参考图里拿出来、
+ * 把被标记的图排到第一张（API 规定第一张是被编辑的图）。
+ */
+export const MARKUP_FILE_PREFIX = "chatui-markup-";
+
+export function markupFileNameFor(targetName: string): string {
+	return `${MARKUP_FILE_PREFIX}${targetName}.png`;
+}
+
+export function isMarkupFileName(name: string | undefined): boolean {
+	return typeof name === "string" && name.startsWith(MARKUP_FILE_PREFIX);
+}
+
+/** 图层画在哪张图上；不是图层文件时返回 undefined。 */
+export function markupTargetName(name: string): string | undefined {
+	if (!isMarkupFileName(name)) return undefined;
+	return name.slice(MARKUP_FILE_PREFIX.length).replace(/\.png$/i, "");
+}
+
+/**
+ * 编号批注的文字说明，附在用户的文字后面。编号和图层上的徽标一一对应，
+ * 文字不画进图层，免得模型把它当成要画进图里的字。
+ */
+export function formatMarkupNotes(notes: readonly string[]): string | undefined {
+	const cleaned = notes.map((note) => note.trim()).filter(Boolean);
+	if (cleaned.length === 0) return undefined;
+	return [
+		"Numbered marks on the markup layer:",
+		...cleaned.map((note, i) => `${i + 1}. ${note.replace(/\s*\n\s*/g, "\n   ")}`),
+	].join("\n");
+}

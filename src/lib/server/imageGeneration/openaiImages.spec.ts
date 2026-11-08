@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ObjectId } from "mongodb";
 import { MessageUpdateType, type MessageUpdate } from "$lib/types/MessageUpdate";
+import { markupFileNameFor } from "$lib/imageGeneration";
+import sharp from "sharp";
 import type { TextGenerationContext } from "$lib/server/textGeneration/types";
 
 // 1x1 PNG
@@ -246,6 +248,125 @@ describe("generateImage", () => {
 			ctx({ files: [{ type: "hash", value: "sha-gone", mime: "image/png", name: "a.png" }] })
 		);
 		expect((updates[0] as { text: string }).text).toBe("生图失败：404 File not found");
+	});
+
+	describe("markup-guided edits", () => {
+		async function png(width: number, height: number, alpha = false) {
+			return sharp({
+				create: {
+					width,
+					height,
+					channels: alpha ? 4 : 3,
+					background: alpha ? { r: 0, g: 0, b: 0, alpha: 0 } : { r: 10, g: 20, b: 30 },
+				},
+			})
+				.png()
+				.toBuffer();
+		}
+		function serve(files: Record<string, Buffer>, mime = "image/png") {
+			mocks.downloadFile.mockImplementation(async (sha: string) => ({
+				type: "base64",
+				value: files[sha].toString("base64"),
+				mime,
+				name: sha,
+			}));
+		}
+		async function partSize(part: FormDataEntryValue | null) {
+			const buf = Buffer.from(await (part as Blob).arrayBuffer());
+			const meta = await sharp(buf).metadata();
+			return [meta.width, meta.height, meta.hasAlpha];
+		}
+
+		it("sends the layer as markup, edits the marked image first, and scales the layer to it", async () => {
+			const other = await png(64, 48);
+			const target = await png(96, 64);
+			serve({ "sha-other": other, "sha-target": target, "sha-markup": await png(48, 32, true) });
+			mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
+
+			const updates = await collect(
+				ctx({
+					content: "recolor the circled vase",
+					files: [
+						{ type: "hash", value: "sha-other", mime: "image/png", name: "other.png" },
+						{ type: "hash", value: "sha-target", mime: "image/png", name: "vase.png" },
+						{
+							type: "hash",
+							value: "sha-markup",
+							mime: "image/png",
+							name: markupFileNameFor("vase.png"),
+						},
+					],
+				})
+			);
+
+			const form = mocks.fetch.mock.calls[0][1].body as FormData;
+			const images = form.getAll("image[]");
+			expect(images).toHaveLength(2);
+			// the marked image (96x64) goes first even though it was attached second
+			expect(await partSize(images[0])).toEqual([96, 64, false]);
+			expect(await partSize(images[1])).toEqual([64, 48, false]);
+			expect(await partSize(form.get("markup"))).toEqual([96, 64, true]);
+			expect(form.get("mask")).toBeNull();
+			expect((updates[updates.length - 1] as { text: string }).text).toContain("已按标记编辑");
+		});
+
+		it("applies EXIF orientation so the layer lines up with what the browser showed", async () => {
+			// stored 80x40 with orientation 6 (rotate 90°): the browser shows 40x80
+			const photo = await sharp({
+				create: { width: 80, height: 40, channels: 3, background: { r: 200, g: 0, b: 0 } },
+			})
+				.jpeg()
+				.withMetadata({ orientation: 6 })
+				.toBuffer();
+			mocks.downloadFile.mockImplementation(async (sha: string) =>
+				sha === "sha-photo"
+					? { type: "base64", value: photo.toString("base64"), mime: "image/jpeg", name: sha }
+					: {
+							type: "base64",
+							value: (await png(40, 80, true)).toString("base64"),
+							mime: "image/png",
+							name: sha,
+						}
+			);
+			mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
+
+			await collect(
+				ctx({
+					files: [
+						{ type: "hash", value: "sha-photo", mime: "image/jpeg", name: "photo.jpg" },
+						{
+							type: "hash",
+							value: "sha-m",
+							mime: "image/png",
+							name: markupFileNameFor("photo.jpg"),
+						},
+					],
+				})
+			);
+			const form = mocks.fetch.mock.calls[0][1].body as FormData;
+			const [w, h] = await partSize(form.get("image[]"));
+			expect([w, h]).toEqual([40, 80]);
+			expect(await partSize(form.get("markup"))).toEqual([40, 80, true]);
+		});
+
+		it("refuses a layer whose image is not in the message", async () => {
+			serve({ "sha-other": await png(64, 48) });
+			const updates = await collect(
+				ctx({
+					files: [
+						{ type: "hash", value: "sha-other", mime: "image/png", name: "other.png" },
+						{
+							type: "hash",
+							value: "sha-m",
+							mime: "image/png",
+							name: markupFileNameFor("gone.png"),
+						},
+					],
+				})
+			);
+			expect(mocks.fetch).not.toHaveBeenCalled();
+			expect((updates[0] as { text: string }).text).toContain("找不到标记图层");
+		});
 	});
 
 	it("turns an API error into a readable answer without storing anything", async () => {

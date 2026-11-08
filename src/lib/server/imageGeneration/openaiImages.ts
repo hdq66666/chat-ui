@@ -14,11 +14,15 @@ import { config } from "$lib/server/config";
 import { logger } from "$lib/server/logger";
 import { uploadFile } from "$lib/server/files/uploadFile";
 import { downloadFile } from "$lib/server/files/downloadFile";
-import { makeImageProcessor } from "$lib/server/endpoints/images";
+import { makeImageProcessor, needsHeifDecoder } from "$lib/server/endpoints/images";
+import sharp from "sharp";
+import type { MessageFile } from "$lib/types/Message";
 import {
 	IMAGE_STABLE_MAX_PIXELS,
 	imageSizeViolation,
 	isImageComplexity,
+	isMarkupFileName,
+	markupTargetName,
 	resolveImageDimensions,
 } from "$lib/imageGeneration";
 import { MessageUpdateType, type MessageUpdate } from "$lib/types/MessageUpdate";
@@ -97,7 +101,7 @@ async function buildPrompt(ctx: TextGenerationContext) {
 	const files = user?.files ?? [];
 	const pasted: string[] = [];
 	for (const file of files.filter((f) => f.mime === CLIPBOARD_MIME)) {
-		const raw = file.type === "base64" ? file : await downloadFile(file.value, ctx.conv._id);
+		const raw = await loadFile(ctx, file);
 		pasted.push(Buffer.from(raw.value, "base64").toString("utf-8"));
 	}
 	const prompt = [...pasted, user?.content ?? ""]
@@ -118,17 +122,71 @@ const editInputProcessor = makeImageProcessor({
 	maxHeight: EDIT_INPUT_MAX_EDGE,
 });
 
+type EditInput = { buffer: Buffer; mime: string; name: string };
+
+async function loadFile(ctx: TextGenerationContext, file: MessageFile) {
+	return file.type === "base64" ? file : await downloadFile(file.value, ctx.conv._id);
+}
+
+/**
+ * 按 EXIF 方向转正。浏览器画标记时看到的是转正后的图，图层的宽高也是转正后的；
+ * 不转正的话图层会和原图对不上。转正后去掉方向标记，格式不变。
+ */
+async function autoOrient(file: MessageFile): Promise<MessageFile> {
+	const buffer = Buffer.from(file.value, "base64");
+	if (needsHeifDecoder(buffer, file.mime)) return file;
+	const meta = await sharp(buffer).metadata();
+	if (!meta.orientation || meta.orientation === 1) return file;
+	const rotated = await sharp(buffer).rotate().toBuffer();
+	return { ...file, value: rotated.toString("base64") };
+}
+
 async function loadEditInputs(ctx: TextGenerationContext) {
 	const user = lastUserMessage(ctx);
-	const files = (user?.files ?? []).filter((f) => f.mime?.startsWith("image/"));
-	const out: Array<{ buffer: Buffer; mime: string; name: string }> = [];
-	for (const file of files.slice(0, EDIT_INPUT_MAX_IMAGES)) {
-		const raw = file.type === "base64" ? file : await downloadFile(file.value, ctx.conv._id);
+	const all = (user?.files ?? []).filter((f) => f.mime?.startsWith("image/"));
+	// 只认第一个图层；多出来的图层文件不当参考图发
+	const markupFile = all.find((f) => isMarkupFileName(f.name));
+	let images = all.filter((f) => !isMarkupFileName(f.name));
+	if (markupFile) {
+		const target = markupTargetName(markupFile.name);
+		const i = images.findIndex((f) => f.name === target);
+		// 图层必须叠在它画的那张图上；找不到就不发，免得叠到别的图上
+		if (i < 0) return { inputs: [], markup: undefined, markupTargetMissing: true, skipped: 0 };
+		if (i > 0) images = [images[i], ...images.slice(0, i), ...images.slice(i + 1)];
+	}
+
+	const inputs: EditInput[] = [];
+	for (const file of images.slice(0, EDIT_INPUT_MAX_IMAGES)) {
+		const raw = await autoOrient(await loadFile(ctx, file));
 		const processed = await editInputProcessor({ ...raw, name: file.name });
 		const ext = processed.mime.split("/")[1] ?? "png";
-		out.push({ buffer: processed.image, mime: processed.mime, name: `input-${out.length}.${ext}` });
+		inputs.push({
+			buffer: processed.image,
+			mime: processed.mime,
+			name: `input-${inputs.length}.${ext}`,
+		});
 	}
-	return { inputs: out, skipped: Math.max(0, files.length - EDIT_INPUT_MAX_IMAGES) };
+
+	// 官方要求图层和第一张图同宽同高：按处理后的第一张图（可能被缩到 3840 边）缩放
+	let markup: EditInput | undefined;
+	if (markupFile && inputs.length) {
+		const { width, height } = await sharp(inputs[0].buffer).metadata();
+		if (!width || !height) throw new Error("读不出被编辑图片的尺寸");
+		const raw = await loadFile(ctx, markupFile);
+		const buffer = await sharp(Buffer.from(raw.value, "base64"))
+			.resize(width, height, { fit: "fill" })
+			.ensureAlpha()
+			.png()
+			.toBuffer();
+		markup = { buffer, mime: "image/png", name: "markup.png" };
+	}
+
+	return {
+		inputs,
+		markup,
+		markupTargetMissing: false,
+		skipped: Math.max(0, images.length - EDIT_INPUT_MAX_IMAGES),
+	};
 }
 
 async function callImagesApi(
@@ -136,7 +194,8 @@ async function callImagesApi(
 	params: {
 		prompt: string;
 		size: string;
-		inputs: Array<{ buffer: Buffer; mime: string; name: string }>;
+		inputs: EditInput[];
+		markup?: EditInput;
 	}
 ): Promise<ImagesApiResponse> {
 	const apiKey = config.OPENAI_IMAGE_API_KEY;
@@ -178,6 +237,14 @@ async function callImagesApi(
 				"image[]",
 				new Blob([new Uint8Array(input.buffer)], { type: input.mime }),
 				input.name
+			);
+		}
+		// 不和 mask 同用（我们从不发 mask）
+		if (params.markup) {
+			form.append(
+				"markup",
+				new Blob([new Uint8Array(params.markup.buffer)], { type: params.markup.mime }),
+				params.markup.name
 			);
 		}
 		body = form;
@@ -265,15 +332,26 @@ export async function* generateImage(
 			yield finalAnswer("请用文字描述要生成或修改的图片。");
 			return;
 		}
-		const { inputs, skipped } = await loadEditInputs(ctx);
+		const { inputs, markup, markupTargetMissing, skipped } = await loadEditInputs(ctx);
+		if (markupTargetMissing) {
+			yield finalAnswer("找不到标记图层对应的图片，请把被标记的图片和标记一起发送。");
+			return;
+		}
 		const complexity = effectiveComplexity(ctx);
 		const mode = inputs.length ? "edit" : "generate";
 		logger.info(
-			{ model: ctx.model.id, mode, size: dims.size, complexity, inputs: inputs.length },
+			{
+				model: ctx.model.id,
+				mode,
+				size: dims.size,
+				complexity,
+				inputs: inputs.length,
+				markup: Boolean(markup),
+			},
 			"[image] request"
 		);
 
-		const res = await callImagesApi(ctx, { prompt, size: dims.size, inputs });
+		const res = await callImagesApi(ctx, { prompt, size: dims.size, inputs, markup });
 		const b64 = res.data?.[0]?.b64_json;
 		if (!b64) throw new Error("响应里没有 b64_json");
 
@@ -295,7 +373,7 @@ export async function* generateImage(
 			"[image] done"
 		);
 		const notes = [
-			`${mode === "edit" ? "已编辑" : "已生成"}：${dims.tier} ${dims.aspect}（${res.size || dims.size}）` +
+			`${mode === "edit" ? (markup ? "已按标记编辑" : "已编辑") : "已生成"}：${dims.tier} ${dims.aspect}（${res.size || dims.size}）` +
 				`${complexity ? `，复杂度 ${complexity}` : ""}，${seconds} 秒。`,
 		];
 		if (dims.width * dims.height > IMAGE_STABLE_MAX_PIXELS) {
