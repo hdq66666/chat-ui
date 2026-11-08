@@ -1,3 +1,5 @@
+import { randomUUID } from "$lib/utils/randomUuid";
+
 /**
  * Hand-off to the gpt-anime-denoise web page (PUBLIC_ANIME_DENOISE_URL), which runs on another origin and
  * removes the fish-scale texture GPT image models leave in anime-style pictures.
@@ -73,7 +75,7 @@ export function postImageToDenoise(
 	origin: string,
 	image: DenoisePayload,
 	host: MessageHost,
-	id: string = crypto.randomUUID()
+	id: string = randomUUID() // crypto.randomUUID alone is missing on plain-http pages
 ): Promise<void> {
 	return new Promise((resolve, reject) => {
 		let lastSent = 0;

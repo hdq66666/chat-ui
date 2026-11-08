@@ -109,6 +109,23 @@ describe("postImageToDenoise", () => {
 		expect(listeners.size).toBe(0);
 	});
 
+	it("works where crypto.randomUUID is missing (chat-ui served over plain http)", async () => {
+		const real = globalThis.crypto;
+		vi.stubGlobal("crypto", { getRandomValues: (a: Uint8Array) => real.getRandomValues(a) });
+		try {
+			const { win, posted } = fakeTool();
+			const { host, emit } = fakeHost();
+			const done = postImageToDenoise(win, ORIGIN, image(), host);
+			emit({ type: "anime-denoise:ready" }, win);
+			const sent = posted.find((p) => p.message.type === "anime-denoise:image");
+			expect(sent?.message.id).toMatch(/^[0-9a-f-]{36}$/);
+			emit({ type: "anime-denoise:received", id: sent?.message.id }, win);
+			await expect(done).resolves.toBeUndefined();
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
 	it("resends when the acknowledgement does not come", async () => {
 		const { win, posted } = fakeTool();
 		const { host, emit } = fakeHost();
