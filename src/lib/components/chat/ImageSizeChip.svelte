@@ -93,8 +93,9 @@
 		return m ? formatCostMultiplier(m) : undefined;
 	}
 
+	// Default sends no complexity, so the API uses high (unless the server sets OPENAI_IMAGE_COMPLEXITY)
 	const COMPLEXITY_OPTIONS: { value: ImageComplexity | undefined; label: string }[] = [
-		{ value: undefined, label: "Default" },
+		{ value: undefined, label: "Default (High)" },
 		...IMAGE_COMPLEXITIES.map((c) => ({ value: c, label: capitalize(c) })),
 	];
 
