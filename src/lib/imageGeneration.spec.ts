@@ -17,6 +17,11 @@ import {
 	markupTargetNameFor,
 	newMarkupTag,
 	resolveImageDimensions,
+	traceEditLineage,
+	formatEditContext,
+	lineageTurns,
+	MARKUP_NOTES_HEADER,
+	type LineageMessage,
 } from "./imageGeneration";
 
 describe("image size tiers", () => {
@@ -161,5 +166,111 @@ describe("image size tiers", () => {
 		expect(resolveImageDimensions(undefined, undefined).size).toBe("1024x1024");
 		expect(resolveImageDimensions("8K", "7:5").size).toBe("1024x1024");
 		expect(resolveImageDimensions("2K", "16:9").size).toBe("2048x1152");
+	});
+});
+
+describe("multi-turn edit context", () => {
+	const img = (value: string, name = `${value}.png`) => ({ name, mime: "image/png", value });
+	const out = (value: string) => img(value, "gpt-image-2.6-sunburst-2048x2048.png");
+	const notes = (...n: string[]) =>
+		`${MARKUP_NOTES_HEADER}\n${n.map((x, i) => `${i + 1}. ${x}`).join("\n")}`;
+
+	// a typical line: upload two images + request -> output -> markup on that output -> output
+	const conversation: LineageMessage[] = [
+		{ from: "system", content: "" },
+		{
+			from: "user",
+			content: "make the mascot smile, a flag in its left hand, white background",
+			files: [img("char"), img("ref")],
+		},
+		{ from: "assistant", content: "已编辑", files: [out("o1")] },
+		{
+			from: "user",
+			content: notes("no red cape", "thinner lines"),
+			files: [
+				img("o1", "mk-aaaaaaaaaaaa-out.png"),
+				img("layer1", markupFileNameFor("aaaaaaaaaaaa")),
+			],
+		},
+		{ from: "assistant", content: "已按标记编辑", files: [out("o2")] },
+	];
+
+	it("walks back from the edited image to the original request and its uploads", () => {
+		const lineage = traceEditLineage(conversation, 4);
+		expect(lineage.root?.text).toContain("a flag in its left hand");
+		expect(lineage.root?.references.map((f) => f.value)).toEqual(["char", "ref"]);
+		expect(lineage.edits).toEqual([
+			{
+				index: 3,
+				text: "Notes for marks drawn on an earlier version:\n1. no red cape\n2. thinner lines",
+				markup: true,
+			},
+		]);
+		expect(lineageTurns(lineage)).toBe(2);
+	});
+
+	it("skips failed turns and follows plain follow-ups (no attachment) back through the chain", () => {
+		const msgs: LineageMessage[] = [
+			...conversation,
+			{ from: "user", content: "被拦下的那句" },
+			{ from: "assistant", content: "生图失败" },
+			{ from: "user", content: "眼睛更生动" },
+			{ from: "assistant", content: "基于上一张图编辑", files: [out("o3")] },
+		];
+		const lineage = traceEditLineage(msgs, 8);
+		expect(lineage.root?.index).toBe(1);
+		expect(lineage.edits.map((e) => e.text)).toEqual([
+			"Notes for marks drawn on an earlier version:\n1. no red cape\n2. thinner lines",
+			"眼睛更生动",
+		]);
+	});
+
+	it("starts a new line at a 'new image' turn or a fresh upload", () => {
+		const fresh: LineageMessage[] = [
+			...conversation,
+			{ from: "user", content: "画一只猫", imageFresh: true },
+			{ from: "assistant", content: "已生成", files: [out("cat")] },
+		];
+		expect(traceEditLineage(fresh, 6)).toEqual({
+			root: { index: 5, text: "画一只猫", references: [] },
+			edits: [],
+		});
+		const upload: LineageMessage[] = [
+			...conversation,
+			{ from: "user", content: "把这张图调亮", files: [img("photo")] },
+			{ from: "assistant", content: "已编辑", files: [out("bright")] },
+		];
+		expect(traceEditLineage(upload, 6).edits).toEqual([]);
+		expect(traceEditLineage(upload, 6).root?.references.map((f) => f.value)).toEqual(["photo"]);
+	});
+
+	it("keeps the root and the latest edits when the history is long", () => {
+		const lineage = {
+			root: { index: 1, text: "原始需求", references: [] },
+			edits: Array.from({ length: 30 }, (_, i) => ({
+				index: i,
+				text: `第 ${i + 1} 次修改 ${"x".repeat(80)}`,
+				markup: false,
+			})),
+		};
+		const prompt = formatEditContext(lineage, "现在这句", { references: 0, maxChars: 1000 }) ?? "";
+		expect(prompt).toContain("Original request:\n原始需求");
+		expect(prompt).toMatch(/\(\d+ earlier edits omitted\)/);
+		expect(prompt).toContain("第 30 次修改");
+		expect(prompt).not.toContain("第 1 次修改");
+		expect(prompt).toContain("Now apply this edit to image 1:\n现在这句");
+	});
+
+	it("names the image roles and returns nothing when there is no history to add", () => {
+		const prompt = formatEditContext(traceEditLineage(conversation, 4), "眼睛更生动", {
+			references: 2,
+		});
+		expect(prompt).toContain("Image 1 is the current version");
+		expect(prompt).toContain("Images 2-3 are reference images from the original request.");
+		expect(prompt?.indexOf("Original request")).toBeLessThan(
+			prompt?.indexOf("Edits already made") ?? 0
+		);
+		expect(prompt).toContain("Later instructions override earlier ones.");
+		expect(formatEditContext({ edits: [] }, "x", { references: 0 })).toBeUndefined();
 	});
 });

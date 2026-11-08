@@ -468,10 +468,96 @@ describe("generateImage", () => {
 			expect(form.getAll("image[]")).toHaveLength(1);
 			// 2K tier from the setting, 16:9 from the source image (setting says 1:1)
 			expect(form.get("size")).toBe("2048x1152");
-			expect(form.get("prompt")).toBe(`${CHAIN_EDIT_PREAMBLE}\n\n提高分辨率`);
+			const prompt = String(form.get("prompt"));
+			// the failed turn ("something") is left out; the request that made the image is carried
+			expect(prompt).toContain("Original request:\ndraw a room");
+			expect(prompt).not.toContain("something");
+			expect(prompt).toContain("Now apply this edit to image 1:\n提高分辨率");
 			const text = (updates[updates.length - 1] as { text: string }).text;
 			expect(text).toContain("基于上一张图编辑（1536x864 → 2048x1152）");
 			expect(text).toContain("比例沿用上一张图（16:9）");
+		});
+
+		it("keeps the old preamble when the previous image has no history to carry", async () => {
+			const out = await png(1024, 1024);
+			mocks.downloadFile.mockResolvedValue({
+				type: "base64",
+				value: out.toString("base64"),
+				mime: "image/png",
+				name: "x",
+			});
+			mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
+			const c = chainCtx({ prevReply: false });
+			(c.messages[1] as { content: string }).content = "";
+			await collect(c);
+			const form = mocks.fetch.mock.calls[0][1].body as FormData;
+			expect(form.get("prompt")).toBe(`${CHAIN_EDIT_PREAMBLE}\n\n提高分辨率`);
+		});
+
+		it("carries the whole history and the original uploads when marking an earlier output", async () => {
+			const files: Record<string, Buffer> = {
+				char: await png(512, 512),
+				ref: await png(256, 256),
+				o1: await png(1024, 1024),
+				layer: await sharp({
+					create: {
+						width: 1024,
+						height: 1024,
+						channels: 4,
+						background: { r: 0, g: 0, b: 0, alpha: 0 },
+					},
+				})
+					.png()
+					.toBuffer(),
+			};
+			mocks.downloadFile.mockImplementation(async (sha: string) => ({
+				type: "base64",
+				value: files[sha].toString("base64"),
+				mime: "image/png",
+				name: sha,
+			}));
+			mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
+			const h = (value: string, name: string) => ({ type: "hash", value, mime: "image/png", name });
+			const c = {
+				model: { id: "gpt-image-2.6-sunburst", imageGeneration: true },
+				conv: { _id: new ObjectId() },
+				messages: [
+					{ from: "system", id: "s", content: "" },
+					{
+						from: "user",
+						id: "u0",
+						content: "a flag in the left hand, white background",
+						files: [h("char", "char.png"), h("ref", "ref.png")],
+					},
+					{ from: "assistant", id: "a0", content: "已编辑", files: [h("o1", "out.png")] },
+					{
+						from: "user",
+						id: "u1",
+						content: "Numbered marks on the markup layer:\n1. 描边太粗",
+						files: [
+							h("o1", markupTargetNameFor("bbbbbbbbbbbb", "out.png")),
+							h("layer", markupFileNameFor("bbbbbbbbbbbb")),
+						],
+					},
+				],
+				abortController: new AbortController(),
+				imageSize: "1K",
+				imageAspect: "1:1",
+			} as unknown as TextGenerationContext;
+			const updates = await collect(c);
+
+			const form = mocks.fetch.mock.calls[0][1].body as FormData;
+			const images = form.getAll("image[]");
+			expect(images).toHaveLength(3); // the marked output first, then the two original uploads
+			expect(form.get("markup")).not.toBeNull();
+			const prompt = String(form.get("prompt"));
+			expect(prompt).toContain("Images 2-3 are reference images from the original request.");
+			expect(prompt).toContain("Original request:\na flag in the left hand, white background");
+			expect(prompt).toContain(
+				"Now apply this edit to image 1:\nNumbered marks on the markup layer:\n1. 描边太粗"
+			);
+			const text = (updates[updates.length - 1] as { text: string }).text;
+			expect(text).toContain("已带上之前 1 轮的要求和最初的 2 张参考图");
 		});
 
 		it("generates from scratch when the user message asks for a new image", async () => {

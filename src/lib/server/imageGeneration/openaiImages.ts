@@ -22,7 +22,12 @@ import {
 	imageSizeViolation,
 	isImageComplexity,
 	CHAIN_EDIT_PREAMBLE,
+	IMAGE_PROMPT_MAX_CHARS,
 	findChainSource,
+	formatEditContext,
+	lineageTurns,
+	traceEditLineage,
+	type EditLineage,
 	isMarkupFileName,
 	nearestImageAspect,
 	markupTagOf,
@@ -118,8 +123,59 @@ async function loadChainInput(ctx: TextGenerationContext) {
 		width,
 		height,
 		messageId: ctx.messages[source.index].id,
+		sourceIndex: source.index,
 		file: source.file,
 	};
+}
+
+/** 当前用户消息在 ctx.messages 里的位置。 */
+function currentUserIndex(ctx: TextGenerationContext) {
+	let i = ctx.messages.length - 1;
+	while (i >= 0 && ctx.messages[i].from !== "user") i--;
+	return i;
+}
+
+/** 标记的是对话里之前生成的图时，返回那条助手消息的位置（标记上传的新图返回 -1）。 */
+function markedOutputIndex(ctx: TextGenerationContext) {
+	const current = currentUserIndex(ctx);
+	const files = ctx.messages[current]?.files ?? [];
+	const layer = files.find((f) => isMarkupFileName(f.name));
+	const tag = layer ? markupTagOf(layer.name) : undefined;
+	const target = tag ? files.find((f) => markupTagOfTarget(f.name) === tag) : undefined;
+	if (!target || target.type !== "hash") return -1;
+	for (let i = current - 1; i >= 0; i--) {
+		const m = ctx.messages[i];
+		if (m.from === "assistant" && m.files?.some((f) => f.value === target.value)) return i;
+	}
+	return -1;
+}
+
+/** 起点那轮上传的原图（参考图）最多再带几张：每张 2K 图约 1.5k 输入图像 token */
+const CONTEXT_MAX_REFERENCES = 4;
+
+/** 把起点那轮上传的原图作为参考图再发一次（官方：第一张之外的图都是参考）。 */
+async function loadLineageReferences(
+	ctx: TextGenerationContext,
+	lineage: EditLineage<MessageFile>,
+	room: number,
+	exclude: Set<string>
+) {
+	const refs: EditInput[] = [];
+	const seen = new Set(exclude);
+	for (const file of lineage.root?.references ?? []) {
+		if (refs.length >= Math.min(room, CONTEXT_MAX_REFERENCES)) break;
+		if (seen.has(file.value)) continue;
+		seen.add(file.value);
+		try {
+			const raw = await autoOrient(await loadFile(ctx, file));
+			const processed = await editInputProcessor({ ...raw, name: file.name });
+			refs.push({ buffer: processed.image, mime: processed.mime, name: file.name });
+		} catch (err) {
+			// 参考图只是补充：读不出来就不带，不让这一轮失败
+			logger.warn({ err: errorDetail(err), name: file.name }, "[image] reference skipped");
+		}
+	}
+	return refs;
 }
 
 function lastUserMessage(ctx: TextGenerationContext) {
@@ -421,6 +477,38 @@ export async function* generateImage(
 			requestPrompt = `${CHAIN_EDIT_PREAMBLE}\n\n${prompt}`;
 		}
 		mode = chain ? "chain" : inputs.length ? "edit" : "generate";
+
+		// 接着改之前生成的图（连续编辑，或标记了之前的输出）：把这张图的来历带上
+		const sourceIndex = chain ? chain.sourceIndex : markup ? markedOutputIndex(ctx) : -1;
+		let contextTurns = 0;
+		let references = 0;
+		if (sourceIndex >= 0) {
+			const prior = ctx.messages.slice(0, currentUserIndex(ctx));
+			const lineage = traceEditLineage(prior, sourceIndex) as EditLineage<MessageFile>;
+			const exclude = new Set(
+				[chain?.file, ...(lastUserMessage(ctx)?.files ?? [])]
+					.filter((f): f is MessageFile => Boolean(f))
+					.map((f) => f.value)
+			);
+			const refs = await loadLineageReferences(
+				ctx,
+				lineage,
+				EDIT_INPUT_MAX_IMAGES - inputs.length,
+				exclude
+			);
+			const withContext = formatEditContext(lineage, prompt, { references: refs.length });
+			if (withContext && withContext.length <= IMAGE_PROMPT_MAX_CHARS) {
+				requestPrompt = withContext;
+				contextTurns = lineageTurns(lineage);
+				references = refs.length;
+				for (const ref of refs) {
+					inputs.push({
+						...ref,
+						name: `input-${inputs.length}.${ref.mime.split("/")[1] ?? "png"}`,
+					});
+				}
+			}
+		}
 		const complexity = effectiveComplexity(ctx);
 		logger.info(
 			{
@@ -430,6 +518,9 @@ export async function* generateImage(
 				complexity,
 				inputs: inputs.length,
 				markup: Boolean(markup),
+				contextTurns,
+				references,
+				promptChars: requestPrompt.length,
 				...(chain
 					? {
 							chainSource: {
@@ -484,6 +575,11 @@ export async function* generateImage(
 		];
 		if (chain && dims.aspect !== resolveImageDimensions(ctx.imageSize, ctx.imageAspect).aspect) {
 			notes.push(`比例沿用上一张图（${dims.aspect}），不按设置裁切。`);
+		}
+		if (contextTurns) {
+			notes.push(
+				`已带上之前 ${contextTurns} 轮的要求${references ? `和最初的 ${references} 张参考图` : ""}。`
+			);
 		}
 		if (dims.width * dims.height > IMAGE_STABLE_MAX_PIXELS) {
 			notes.push("超过 2560×1440 的尺寸 OpenAI 标为实验性。");

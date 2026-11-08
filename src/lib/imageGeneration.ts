@@ -138,11 +138,13 @@ export function markupTagOfTarget(name: string | undefined): string | undefined 
  * 编号批注的文字说明，附在用户的文字后面。编号和图层上的徽标一一对应，
  * 文字不画进图层，免得模型把它当成要画进图里的字。
  */
+export const MARKUP_NOTES_HEADER = "Numbered marks on the markup layer:";
+
 export function formatMarkupNotes(notes: readonly string[]): string | undefined {
 	const cleaned = notes.map((note) => note.trim()).filter(Boolean);
 	if (cleaned.length === 0) return undefined;
 	return [
-		"Numbered marks on the markup layer:",
+		MARKUP_NOTES_HEADER,
 		...cleaned.map((note, i) => `${i + 1}. ${note.replace(/\s*\n\s*/g, "\n   ")}`),
 	].join("\n");
 }
@@ -214,3 +216,173 @@ export function nearestImageAspect(width: number, height: number): ImageAspect {
  */
 export const CHAIN_EDIT_PREAMBLE =
 	"Edit the provided image as instructed below. Keep everything not mentioned unchanged (subject, composition, style, colors).";
+
+/**
+ * 多轮编辑的上下文。Image API 不记对话（官方多轮靠 Responses API，但 2.6 的标记编辑和
+ * complexity 只在 Image API 上），所以每次编辑都把"这张图是怎么来的"重新写进 prompt：
+ * 从被编辑的图往回追 —— 它由哪一轮生成，那一轮又改的是哪张图 —— 直到最初的请求。
+ *
+ * 按文件哈希追：标记编辑的目标图和它对应的助手输出是同一份内容（同一个哈希）。
+ * 失败的轮次没有出图，自然不在链上（也就不会把被审核拦下的文字再发一遍）；
+ * 分支由调用方传入的当前路径决定。
+ */
+export interface LineageFile {
+	name: string;
+	mime: string;
+	value?: string;
+}
+
+export interface LineageMessage {
+	from: string;
+	content?: string;
+	imageFresh?: boolean;
+	files?: LineageFile[];
+}
+
+export interface EditLineage<F extends LineageFile = LineageFile> {
+	/** 链的起点：从零生成，或编辑用户上传的图。text 为空表示起点那轮没有可用的文字 */
+	root?: { index: number; text: string; references: F[] };
+	/** 之后每一轮的编辑要求，从早到晚；标记说明已改写成指向"更早的版本" */
+	edits: Array<{ index: number; text: string; markup: boolean }>;
+}
+
+const isImageFile = (f: LineageFile) => Boolean(f.mime?.startsWith("image/"));
+
+/** 存下来的标记轮次正文里，图层说明的标题指的是那一轮的图层；放进历史时改写。 */
+export function rewriteEarlierMarkupNotes(text: string): string {
+	return text.replace(MARKUP_NOTES_HEADER, "Notes for marks drawn on an earlier version:").trim();
+}
+
+function lastAssistantWith(prior: readonly LineageMessage[], before: number, value: string) {
+	for (let i = before - 1; i >= 0; i--) {
+		if (prior[i].from === "assistant" && prior[i].files?.some((f) => f.value === value)) return i;
+	}
+	return -1;
+}
+
+/**
+ * `prior`：当前用户消息之前的消息（当前分支）；`sourceIndex`：被编辑的那张图所在的消息。
+ */
+export function traceEditLineage<M extends LineageMessage>(
+	prior: readonly M[],
+	sourceIndex: number
+): EditLineage<NonNullable<M["files"]>[number]> {
+	type F = NonNullable<M["files"]>[number];
+	const edits: EditLineage<F>["edits"] = [];
+	let root: EditLineage<F>["root"];
+	let at = sourceIndex;
+	// 每一步 at 都严格变小，最多走 prior.length 步
+	while (at >= 0 && prior[at]?.from === "assistant") {
+		let u = at - 1;
+		while (u >= 0 && prior[u].from !== "user") u--;
+		if (u < 0) break;
+		const turn = prior[u];
+		const text = (turn.content ?? "").trim();
+		const images = (turn.files ?? []).filter(isImageFile) as F[];
+		const layer = images.find((f) => isMarkupFileName(f.name));
+		const uploads = images.filter((f) => !isMarkupFileName(f.name));
+
+		if (layer) {
+			const tag = markupTagOf(layer.name);
+			const target = uploads.find((f) => markupTagOfTarget(f.name) === tag);
+			const from = target?.value ? lastAssistantWith(prior, u, target.value) : -1;
+			if (from >= 0) {
+				edits.unshift({ index: u, text: rewriteEarlierMarkupNotes(text), markup: true });
+				at = from;
+				continue;
+			}
+			// 标记的是用户上传的图：这一轮就是起点
+			root = { index: u, text: rewriteEarlierMarkupNotes(text), references: uploads };
+			break;
+		}
+		if (uploads.length) {
+			root = { index: u, text, references: uploads };
+			break;
+		}
+		if (turn.imageFresh) {
+			root = { index: u, text, references: [] };
+			break;
+		}
+		const source = findChainSource(prior.slice(0, u));
+		if (!source) {
+			root = { index: u, text, references: [] };
+			break;
+		}
+		edits.unshift({ index: u, text, markup: false });
+		if (prior[source.index].from !== "assistant") {
+			// 接着改的是一张没出过图的上传：那一轮失败了，它的文字不带（可能正是被拦下的那句）
+			root = {
+				index: source.index,
+				text: "",
+				references: (prior[source.index].files ?? []).filter(
+					(f) => isImageFile(f) && !isMarkupFileName(f.name)
+				) as F[],
+			};
+			break;
+		}
+		at = source.index;
+	}
+	return { root, edits: edits.filter((e) => e.text) };
+}
+
+/** 官方 prompt 上限 32,000 字符；历史部分留在这个预算里，给当前这句留足空间 */
+export const EDIT_CONTEXT_MAX_CHARS = 12_000;
+export const IMAGE_PROMPT_MAX_CHARS = 32_000;
+
+const indent = (text: string) => text.replace(/\s*\n\s*/g, "\n   ");
+
+/**
+ * 把追到的上下文和这一轮的要求拼成一个 prompt。英文骨架（不猜用户语言，也不会被当成要画的字），
+ * 用户原话照抄。历史太长时保留起点和最近的几轮，中间写明省略了几轮。
+ * 没有可带的历史时返回 undefined，由调用方用原来的写法。
+ */
+export function formatEditContext(
+	lineage: EditLineage,
+	current: string,
+	opts: { references: number; maxChars?: number }
+): string | undefined {
+	const max = opts.maxChars ?? EDIT_CONTEXT_MAX_CHARS;
+	let rootText = lineage.root?.text ?? "";
+	if (!rootText && lineage.edits.length === 0) return undefined;
+	if (rootText.length > max / 2) rootText = `${rootText.slice(0, max / 2)}…`;
+
+	let budget = max - rootText.length;
+	const kept: string[] = [];
+	let omitted = 0;
+	for (let i = lineage.edits.length - 1; i >= 0; i--) {
+		const line = indent(lineage.edits[i].text);
+		if (line.length + 8 > budget) {
+			omitted = i + 1;
+			break;
+		}
+		budget -= line.length + 8;
+		kept.unshift(line);
+	}
+
+	const parts = [
+		"This continues an image-editing conversation. Image 1 is the current version of the picture: " +
+			"the result of the requests below.",
+	];
+	if (opts.references === 1) {
+		parts[0] += " Image 2 is a reference image from the original request.";
+	} else if (opts.references > 1) {
+		parts[0] += ` Images 2-${opts.references + 1} are reference images from the original request.`;
+	}
+	if (rootText) parts.push(`Original request:\n${rootText}`);
+	if (kept.length || omitted) {
+		const lines = kept.map((line, i) => `${omitted + i + 1}. ${line}`);
+		if (omitted) lines.unshift(`(${omitted} earlier edit${omitted > 1 ? "s" : ""} omitted)`);
+		parts.push(`Edits already made, in order:\n${lines.join("\n")}`);
+	}
+	parts.push(`Now apply this edit to image 1:\n${current}`);
+	parts.push(
+		"Later instructions override earlier ones. Keep every earlier requirement the new instruction " +
+			"does not change, and keep everything else unchanged (subject, composition, style, colors)."
+	);
+	return parts.join("\n\n");
+}
+
+/** 上下文里实际带上的轮数（给回复说明和日志用）。 */
+export function lineageTurns(lineage: EditLineage): number {
+	return (lineage.root?.text ? 1 : 0) + lineage.edits.length;
+}
