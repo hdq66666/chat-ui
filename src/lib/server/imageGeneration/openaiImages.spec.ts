@@ -124,6 +124,31 @@ describe("generateImage", () => {
 		expect(body.moderation).toBe("low");
 	});
 
+	it("prefers the user's complexity over OPENAI_IMAGE_COMPLEXITY and notes it", async () => {
+		mocks.config.OPENAI_IMAGE_COMPLEXITY = "high";
+		mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
+		const c = ctx({});
+		(c as unknown as { imageComplexity: string }).imageComplexity = "low";
+		const updates = await collect(c);
+		expect(JSON.parse(mocks.fetch.mock.calls[0][1].body).complexity).toBe("low");
+		const last = updates[updates.length - 1] as { text: string };
+		expect(last.text).toContain("复杂度 low");
+	});
+
+	it("sends complexity on edits too", async () => {
+		mocks.downloadFile.mockResolvedValue({
+			type: "base64",
+			value: PNG_B64,
+			mime: "image/png",
+			name: "x",
+		});
+		mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
+		const c = ctx({ files: [{ type: "hash", value: "sha-a", mime: "image/png", name: "a.png" }] });
+		(c as unknown as { imageComplexity: string }).imageComplexity = "medium";
+		await collect(c);
+		expect((mocks.fetch.mock.calls[0][1].body as FormData).get("complexity")).toBe("medium");
+	});
+
 	it("drops unknown optional values instead of sending them", async () => {
 		Object.assign(mocks.config, {
 			OPENAI_IMAGE_QUALITY: "ultra",

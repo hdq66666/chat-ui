@@ -8,7 +8,7 @@ import { defaultModel, models, validateModel } from "$lib/server/models";
 import { DEFAULT_SETTINGS, type SettingsEditable } from "$lib/types/Settings";
 import { resolveStreamingMode } from "$lib/utils/messageUpdates";
 import { z } from "zod";
-import { IMAGE_ASPECTS, IMAGE_SIZE_TIERS } from "$lib/imageGeneration";
+import { IMAGE_ASPECTS, IMAGE_COMPLEXITIES, IMAGE_SIZE_TIERS } from "$lib/imageGeneration";
 
 const settingsSchema = z.object({
 	shareConversationsWithModelAuthors: z
@@ -26,6 +26,7 @@ const settingsSchema = z.object({
 	reasoningOverrides: z.record(z.boolean()).default({}),
 	imageSizeOverrides: z.record(z.enum(IMAGE_SIZE_TIERS)).default({}),
 	imageAspectOverrides: z.record(z.enum(IMAGE_ASPECTS)).default({}),
+	imageComplexityOverrides: z.record(z.enum(IMAGE_COMPLEXITIES)).default({}),
 	streamingMode: z.enum(["raw", "smooth"]).optional(),
 	directPaste: z.boolean().default(false),
 	hapticsEnabled: z.boolean().default(true),
@@ -83,6 +84,7 @@ export const GET: RequestHandler = async ({ locals }) => {
 		reasoningOverrides: config.isHuggingChat ? {} : (settings?.reasoningOverrides ?? {}),
 		imageSizeOverrides: settings?.imageSizeOverrides ?? {},
 		imageAspectOverrides: settings?.imageAspectOverrides ?? {},
+		imageComplexityOverrides: settings?.imageComplexityOverrides ?? {},
 		billingOrganization: settings?.billingOrganization ?? undefined,
 	});
 };

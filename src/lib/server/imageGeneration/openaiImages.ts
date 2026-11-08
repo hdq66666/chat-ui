@@ -18,6 +18,7 @@ import { makeImageProcessor } from "$lib/server/endpoints/images";
 import {
 	IMAGE_STABLE_MAX_PIXELS,
 	imageSizeViolation,
+	isImageComplexity,
 	resolveImageDimensions,
 } from "$lib/imageGeneration";
 import { MessageUpdateType, type MessageUpdate } from "$lib/types/MessageUpdate";
@@ -71,6 +72,11 @@ class ImageApiError extends Error {
 	}
 }
 
+/** 用户在菜单里选的优先，其次 OPENAI_IMAGE_COMPLEXITY；都没有就不发，用 API 默认（high）。 */
+function effectiveComplexity(ctx: TextGenerationContext): string | undefined {
+	return isImageComplexity(ctx.imageComplexity) ? ctx.imageComplexity : imageComplexity();
+}
+
 function lastUserMessage(ctx: TextGenerationContext) {
 	for (let i = ctx.messages.length - 1; i >= 0; i--) {
 		if (ctx.messages[i].from === "user") return ctx.messages[i];
@@ -120,7 +126,7 @@ async function callImagesApi(
 	const optional: Record<string, string> = {};
 	const q = quality();
 	if (q) optional.quality = q;
-	const complexity = imageComplexity();
+	const complexity = effectiveComplexity(ctx);
 	if (complexity) optional.complexity = complexity;
 	const moderation = imageModeration();
 	if (moderation) optional.moderation = moderation;
@@ -216,9 +222,10 @@ export async function* generateImage(
 	const startedAt = Date.now();
 	try {
 		const { inputs, skipped } = await loadEditInputs(ctx);
+		const complexity = effectiveComplexity(ctx);
 		const mode = inputs.length ? "edit" : "generate";
 		logger.info(
-			{ model: ctx.model.id, mode, size: dims.size, inputs: inputs.length },
+			{ model: ctx.model.id, mode, size: dims.size, complexity, inputs: inputs.length },
 			"[image] request"
 		);
 
@@ -244,7 +251,8 @@ export async function* generateImage(
 			"[image] done"
 		);
 		const notes = [
-			`${mode === "edit" ? "已编辑" : "已生成"}：${dims.tier} ${dims.aspect}（${res.size || dims.size}），${seconds} 秒。`,
+			`${mode === "edit" ? "已编辑" : "已生成"}：${dims.tier} ${dims.aspect}（${res.size || dims.size}）` +
+				`${complexity ? `，复杂度 ${complexity}` : ""}，${seconds} 秒。`,
 		];
 		if (dims.width * dims.height > IMAGE_STABLE_MAX_PIXELS) {
 			notes.push("超过 2560×1440 的尺寸 OpenAI 标为实验性。");

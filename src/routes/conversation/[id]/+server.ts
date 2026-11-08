@@ -702,6 +702,9 @@ export async function POST({ request, locals, params, getClientAddress }) {
 					imageAspect: model.imageGeneration
 						? userSettings?.imageAspectOverrides?.[model.id]
 						: undefined,
+					imageComplexity: model.imageGeneration
+						? userSettings?.imageComplexityOverrides?.[model.id]
+						: undefined,
 					locals,
 					abortController: ctrl,
 					generationId: effectiveGenerationId,

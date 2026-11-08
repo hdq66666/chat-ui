@@ -17,6 +17,13 @@ export type ImageSizeTier = (typeof IMAGE_SIZE_TIERS)[number];
 export const IMAGE_ASPECTS = ["1:1", "3:2", "2:3", "16:9", "9:16"] as const;
 export type ImageAspect = (typeof IMAGE_ASPECTS)[number];
 
+/**
+ * GPT Image 2.6 的 complexity：渲染前规划多少。官方默认 high，不另收费；
+ * 越高越慢，也更可能改动不该动的地方，局部修改建议用低档。
+ */
+export const IMAGE_COMPLEXITIES = ["low", "medium", "high"] as const;
+export type ImageComplexity = (typeof IMAGE_COMPLEXITIES)[number];
+
 export const DEFAULT_IMAGE_SIZE_TIER: ImageSizeTier = "1K";
 export const DEFAULT_IMAGE_ASPECT: ImageAspect = "1:1";
 
@@ -65,6 +72,10 @@ export function imageSizeViolation(width: number, height: number): string | null
 
 export function isImageSizeTier(value: unknown): value is ImageSizeTier {
 	return typeof value === "string" && (IMAGE_SIZE_TIERS as readonly string[]).includes(value);
+}
+
+export function isImageComplexity(value: unknown): value is ImageComplexity {
+	return typeof value === "string" && (IMAGE_COMPLEXITIES as readonly string[]).includes(value);
 }
 
 export function isImageAspect(value: unknown): value is ImageAspect {

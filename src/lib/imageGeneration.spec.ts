@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
 	IMAGE_ASPECTS,
+	IMAGE_COMPLEXITIES,
 	IMAGE_DIMENSIONS,
 	IMAGE_MAX_PIXELS,
 	IMAGE_SIZE_TIERS,
 	imageSizeViolation,
+	isImageComplexity,
 	resolveImageDimensions,
 } from "./imageGeneration";
 
@@ -55,6 +57,13 @@ describe("image size tiers", () => {
 		expect(imageSizeViolation(1000, 1000)).not.toBeNull(); // not a multiple of 16
 		expect(imageSizeViolation(3840, 1024)).not.toBeNull(); // ratio > 3:1
 		expect(imageSizeViolation(512, 512)).not.toBeNull(); // too few pixels
+	});
+
+	it("recognises only the documented complexity values", () => {
+		expect(IMAGE_COMPLEXITIES).toEqual(["low", "medium", "high"]);
+		expect(isImageComplexity("medium")).toBe(true);
+		expect(isImageComplexity("max")).toBe(false);
+		expect(isImageComplexity(undefined)).toBe(false);
 	});
 
 	it("falls back to 1K 1:1 for missing or unknown values", () => {
