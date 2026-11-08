@@ -27,6 +27,7 @@ export function serializeModelSummary(model: ProcessedModel): GETModelsResponse[
 		supportsArtifacts:
 			(model as unknown as { supportsArtifacts?: boolean }).supportsArtifacts ?? false,
 		imageGeneration: model.imageGeneration ?? false,
+		imageDefaults: model.imageDefaults,
 		unlisted: model.unlisted,
 		hasInferenceAPI: model.hasInferenceAPI,
 		isRouter: model.isRouter,

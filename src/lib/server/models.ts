@@ -8,7 +8,12 @@ import JSON5 from "json5";
 import { logger } from "$lib/server/logger";
 import { preservesReasoningByDefault } from "$lib/server/reasoningPolicy";
 import { makeRouterEndpoint } from "$lib/server/router/endpoint";
-import { imageBaseUrl, imageModelIds } from "$lib/server/imageGeneration/config";
+import {
+	imageBaseUrl,
+	imageComplexity,
+	imageModelIds,
+	imageQuality,
+} from "$lib/server/imageGeneration/config";
 
 type Optional<T, K extends keyof T> = Pick<Partial<T>, K> & Omit<T, K>;
 
@@ -93,6 +98,12 @@ const modelConfig = z.object({
 	 * /images/edits instead of chat completions. Not settable through MODELS overrides.
 	 */
 	imageGeneration: z.boolean().default(false),
+	/**
+	 * Image models only: what the API gets when the user leaves Quality / Complexity on Default
+	 * (OPENAI_IMAGE_QUALITY / OPENAI_IMAGE_COMPLEXITY, else the API defaults auto / high).
+	 * Shown in the size menu so "Default" says what it means.
+	 */
+	imageDefaults: z.object({ quality: z.string(), complexity: z.string() }).optional(),
 	unlisted: z.boolean().default(false),
 	embeddingModel: z.never().optional(),
 	/** Used to enable/disable system prompt usage */
@@ -348,6 +359,10 @@ const buildModels = async (): Promise<ProcessedModel[]> => {
 				supportsReasoning: false,
 				preservesReasoning: false,
 				imageGeneration: true,
+				imageDefaults: {
+					quality: imageQuality() ?? "auto",
+					complexity: imageComplexity() ?? "high",
+				},
 				endpoints: [{ type: "openai" as const, baseURL: imageBaseUrl() }],
 			} as ModelConfig);
 		}
@@ -376,6 +391,7 @@ const buildModels = async (): Promise<ProcessedModel[]> => {
 					...rest,
 					// The request path is decided by OPENAI_IMAGE_MODELS, not by overrides
 					imageGeneration: model.imageGeneration ?? false,
+					imageDefaults: model.imageDefaults,
 				};
 			});
 		}

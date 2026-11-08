@@ -148,6 +148,14 @@ describe("generateImage", () => {
 		expect(last.text).toContain("质量 high");
 	});
 
+	it("notes the server's quality when only OPENAI_IMAGE_QUALITY sets it", async () => {
+		mocks.config.OPENAI_IMAGE_QUALITY = "medium";
+		mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
+		const updates = await collect(ctx({}));
+		expect(JSON.parse(mocks.fetch.mock.calls[0][1].body).quality).toBe("medium");
+		expect((updates[updates.length - 1] as { text: string }).text).toContain("质量 medium");
+	});
+
 	it("sends no quality when neither the user nor the server picked one", async () => {
 		mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
 		const updates = await collect(ctx({}));

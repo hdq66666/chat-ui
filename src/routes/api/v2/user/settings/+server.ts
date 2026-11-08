@@ -9,11 +9,10 @@ import { DEFAULT_SETTINGS, type SettingsEditable } from "$lib/types/Settings";
 import { resolveStreamingMode } from "$lib/utils/messageUpdates";
 import { z } from "zod";
 import {
-	IMAGE_ASPECTS,
-	IMAGE_COMPLEXITIES,
-	IMAGE_QUALITIES,
-	IMAGE_SIZE_TIERS,
-} from "$lib/imageGeneration";
+	imageSettingsFields,
+	omitUnsentImageSettings,
+	readImageSettings,
+} from "$lib/server/imageGeneration/settings";
 
 const settingsSchema = z.object({
 	shareConversationsWithModelAuthors: z
@@ -29,10 +28,7 @@ const settingsSchema = z.object({
 	providerOverrides: z.record(z.string()).default({}),
 	reasoningEffortOverrides: z.record(z.enum(["low", "medium", "high"])).default({}),
 	reasoningOverrides: z.record(z.boolean()).default({}),
-	imageSizeOverrides: z.record(z.enum(IMAGE_SIZE_TIERS)).default({}),
-	imageAspectOverrides: z.record(z.enum(IMAGE_ASPECTS)).default({}),
-	imageComplexityOverrides: z.record(z.enum(IMAGE_COMPLEXITIES)).default({}),
-	imageQualityOverrides: z.record(z.enum(IMAGE_QUALITIES)).default({}),
+	...imageSettingsFields,
 	streamingMode: z.enum(["raw", "smooth"]).optional(),
 	directPaste: z.boolean().default(false),
 	hapticsEnabled: z.boolean().default(true),
@@ -88,10 +84,7 @@ export const GET: RequestHandler = async ({ locals }) => {
 		providerOverrides: settings?.providerOverrides ?? {},
 		reasoningEffortOverrides: settings?.reasoningEffortOverrides ?? {},
 		reasoningOverrides: config.isHuggingChat ? {} : (settings?.reasoningOverrides ?? {}),
-		imageSizeOverrides: settings?.imageSizeOverrides ?? {},
-		imageAspectOverrides: settings?.imageAspectOverrides ?? {},
-		imageComplexityOverrides: settings?.imageComplexityOverrides ?? {},
-		imageQualityOverrides: settings?.imageQualityOverrides ?? {},
+		...readImageSettings(settings),
 		billingOrganization: settings?.billingOrganization ?? undefined,
 	});
 };
@@ -118,7 +111,7 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		authCondition(locals),
 		{
 			$set: {
-				...settings,
+				...omitUnsentImageSettings(settings),
 				...(welcomeModalSeen && { welcomeModalSeenAt: new Date() }),
 				updatedAt: new Date(),
 			},

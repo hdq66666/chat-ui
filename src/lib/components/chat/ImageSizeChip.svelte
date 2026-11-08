@@ -9,6 +9,7 @@
 		IMAGE_QUALITIES,
 		IMAGE_SIZE_TIERS,
 		formatCostMultiplier,
+		isImageQuality,
 		qualityCostMultiplier,
 		resolveImageDimensions,
 		sizeCostMultiplier,
@@ -20,9 +21,11 @@
 
 	interface Props {
 		modelId: string;
+		/** What Default means on this server (from the model list); falls back to the API defaults */
+		defaults?: { quality: string; complexity: string };
 	}
 
-	let { modelId }: Props = $props();
+	let { modelId, defaults }: Props = $props();
 
 	const settings = useSettingsStore();
 
@@ -70,11 +73,19 @@
 
 	const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
-	// Default sends no quality, so the API uses auto (unless the server sets OPENAI_IMAGE_QUALITY)
-	const QUALITY_OPTIONS: { value: ImageQuality | undefined; label: string }[] = [
-		{ value: undefined, label: "Default (Auto)" },
-		...IMAGE_QUALITIES.map((q) => ({ value: q, label: q === "xhigh" ? "XHigh" : capitalize(q) })),
-	];
+	const levelLabel = (v: string) => (v === "xhigh" ? "XHigh" : capitalize(v));
+
+	// Default sends nothing: the server's OPENAI_IMAGE_QUALITY / _COMPLEXITY, else the API (auto / high)
+	let QUALITY_OPTIONS = $derived<{ value: ImageQuality | undefined; label: string }[]>([
+		{ value: undefined, label: `Default (${levelLabel(defaults?.quality ?? "auto")})` },
+		...IMAGE_QUALITIES.map((q) => ({ value: q, label: levelLabel(q) })),
+	]);
+
+	/** The quality the cost estimate uses: the pick, else the server default; auto is estimated as medium. */
+	let costQuality = $derived.by((): ImageQuality | undefined => {
+		const serverDefault = defaults?.quality;
+		return quality ?? (isImageQuality(serverDefault) ? serverDefault : undefined);
+	});
 
 	/** Tiers and qualities that cost noticeably more get a warning with the multiplier. */
 	const WARN_TIERS: readonly ImageSizeTier[] = ["4K"];
@@ -83,7 +94,7 @@
 	// Multipliers follow the official cost calculator, at the size, aspect and quality picked now.
 	function tierWarning(tier: ImageSizeTier) {
 		if (!WARN_TIERS.includes(tier)) return undefined;
-		const m = sizeCostMultiplier(tier, dims.aspect, quality);
+		const m = sizeCostMultiplier(tier, dims.aspect, costQuality);
 		return m ? formatCostMultiplier(m) : undefined;
 	}
 
@@ -93,11 +104,10 @@
 		return m ? formatCostMultiplier(m) : undefined;
 	}
 
-	// Default sends no complexity, so the API uses high (unless the server sets OPENAI_IMAGE_COMPLEXITY)
-	const COMPLEXITY_OPTIONS: { value: ImageComplexity | undefined; label: string }[] = [
-		{ value: undefined, label: "Default (High)" },
-		...IMAGE_COMPLEXITIES.map((c) => ({ value: c, label: capitalize(c) })),
-	];
+	let COMPLEXITY_OPTIONS = $derived<{ value: ImageComplexity | undefined; label: string }[]>([
+		{ value: undefined, label: `Default (${levelLabel(defaults?.complexity ?? "high")})` },
+		...IMAGE_COMPLEXITIES.map((c) => ({ value: c, label: levelLabel(c) })),
+	]);
 
 	function pixels(tier: ImageSizeTier, aspect: ImageAspect) {
 		const d = resolveImageDimensions(tier, aspect);
@@ -138,7 +148,8 @@
 								<span
 									class="ml-1 text-amber-600 dark:text-amber-400"
 									title="About {tierWarning(tier)} the cost of 1K at this aspect ratio and quality"
-									>⚠️ {tierWarning(tier)} cost</span
+									aria-label="Costs about {tierWarning(tier)} as much as 1K"
+									>⚠️ {tierWarning(tier)} vs 1K</span
 								>
 							{/if}
 						</span>
@@ -187,7 +198,8 @@
 							<span
 								class="ml-auto text-xs text-amber-600 tabular-nums dark:text-amber-400"
 								title="About {qualityWarning(opt.value)} the cost of Low at this size"
-								>⚠️ {qualityWarning(opt.value)} cost</span
+								aria-label="Costs about {qualityWarning(opt.value)} as much as Low"
+								>⚠️ {qualityWarning(opt.value)} vs Low</span
 							>
 						{/if}
 						{#if quality === opt.value}

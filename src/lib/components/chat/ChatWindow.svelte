@@ -1337,7 +1337,7 @@
 									Denoise
 								</button>
 							{/if}
-							<ImageSizeChip modelId={currentModel.id} />
+							<ImageSizeChip modelId={currentModel.id} defaults={currentModel.imageDefaults} />
 						</div>
 					{:else if $settings.reasoningOverrides?.[currentModel.id] ?? currentModel.supportsReasoning}
 						<div class="ml-auto">

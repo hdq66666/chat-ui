@@ -100,11 +100,13 @@ describe("image size tiers", () => {
 		expect(imageOutputTokens("4K", "16:9", "max")).toBe(13342);
 		// no quality picked (auto) is estimated as medium
 		expect(imageOutputTokens("2K", "1:1", undefined)).toBe(2944);
-		expect(formatCostMultiplier(sizeCostMultiplier("4K", "1:1", undefined) ?? 0)).toBe("3.4×");
-		expect(formatCostMultiplier(sizeCostMultiplier("4K", "16:9", "medium") ?? 0)).toBe("3.1×");
+		expect(formatCostMultiplier(sizeCostMultiplier("4K", "1:1", undefined) ?? 0)).toBe("3×");
+		expect(formatCostMultiplier(sizeCostMultiplier("4K", "16:9", "medium") ?? 0)).toBe("3×");
 		expect(sizeCostMultiplier("1K", "3:2", "high")).toBe(1);
-		expect(formatCostMultiplier(qualityCostMultiplier("high", "1K", "1:1") ?? 0)).toBe("2.1×");
-		expect(formatCostMultiplier(qualityCostMultiplier("max", "1K", "1:1") ?? 0)).toBe("8.5×");
+		expect(formatCostMultiplier(qualityCostMultiplier("high", "1K", "1:1") ?? 0)).toBe("2×");
+		expect(formatCostMultiplier(qualityCostMultiplier("max", "1K", "1:1") ?? 0)).toBe("9×");
+		expect(formatCostMultiplier(qualityCostMultiplier("xhigh", "1K", "1:1") ?? 0)).toBe("4×");
+		expect(formatCostMultiplier(0.4)).toBe("1×");
 		expect(formatCostMultiplier(2)).toBe("2×");
 	});
 

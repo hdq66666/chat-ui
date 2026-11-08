@@ -25,4 +25,5 @@ export type Model = Pick<
 	| "supportsReasoning"
 	| "supportsArtifacts"
 	| "imageGeneration"
+	| "imageDefaults"
 >;

@@ -149,9 +149,9 @@ export function qualityCostMultiplier(
 	return here && base ? here / base : undefined;
 }
 
-/** 倍数的显示：1 位小数，整数不带 .0。 */
+/** 倍数的显示：四舍五入到整数，至少 1×。 */
 export function formatCostMultiplier(multiplier: number): string {
-	return `${Number(multiplier.toFixed(1))}×`;
+	return `${Math.max(1, Math.round(multiplier))}×`;
 }
 
 export function isImageAspect(value: unknown): value is ImageAspect {

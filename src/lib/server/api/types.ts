@@ -22,6 +22,8 @@ export type GETModelsResponse = Array<{
 	supportsArtifacts: boolean;
 	/** OpenAI Image API model: replies are images; shows the size picker */
 	imageGeneration: boolean;
+	/** Image models only: what Default means for Quality / Complexity on this server */
+	imageDefaults?: { quality: string; complexity: string };
 	unlisted: boolean;
 	hasInferenceAPI: boolean;
 	isRouter: boolean;

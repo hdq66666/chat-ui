@@ -1,11 +1,6 @@
 import { collections } from "$lib/server/database";
 import { z } from "zod";
-import {
-	IMAGE_ASPECTS,
-	IMAGE_COMPLEXITIES,
-	IMAGE_QUALITIES,
-	IMAGE_SIZE_TIERS,
-} from "$lib/imageGeneration";
+import { imageSettingsFields, omitUnsentImageSettings } from "$lib/server/imageGeneration/settings";
 import { authCondition } from "$lib/server/auth";
 import { config } from "$lib/server/config";
 import { DEFAULT_SETTINGS, type SettingsEditable } from "$lib/types/Settings";
@@ -25,10 +20,7 @@ const settingsSchema = z.object({
 	providerOverrides: z.record(z.string()).default({}),
 	reasoningEffortOverrides: z.record(z.enum(["low", "medium", "high"])).default({}),
 	reasoningOverrides: z.record(z.boolean()).default({}),
-	imageSizeOverrides: z.record(z.enum(IMAGE_SIZE_TIERS)).default({}),
-	imageAspectOverrides: z.record(z.enum(IMAGE_ASPECTS)).default({}),
-	imageComplexityOverrides: z.record(z.enum(IMAGE_COMPLEXITIES)).default({}),
-	imageQualityOverrides: z.record(z.enum(IMAGE_QUALITIES)).default({}),
+	...imageSettingsFields,
 	streamingMode: z.enum(["raw", "smooth"]).optional(),
 	directPaste: z.boolean().default(false),
 	hapticsEnabled: z.boolean().default(true),
@@ -57,7 +49,7 @@ export async function POST({ request, locals }) {
 		authCondition(locals),
 		{
 			$set: {
-				...settings,
+				...omitUnsentImageSettings(settings),
 				...(welcomeModalSeen && { welcomeModalSeenAt: new Date() }),
 				updatedAt: new Date(),
 			},
