@@ -70,8 +70,9 @@
 
 	const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
+	// Default sends no quality, so the API uses auto (unless the server sets OPENAI_IMAGE_QUALITY)
 	const QUALITY_OPTIONS: { value: ImageQuality | undefined; label: string }[] = [
-		{ value: undefined, label: "Default" },
+		{ value: undefined, label: "Default (Auto)" },
 		...IMAGE_QUALITIES.map((q) => ({ value: q, label: q === "xhigh" ? "XHigh" : capitalize(q) })),
 	];
 
