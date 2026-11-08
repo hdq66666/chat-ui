@@ -3,6 +3,7 @@ import type { Endpoint } from "../endpoints/endpoints";
 import type { Conversation } from "$lib/types/Conversation";
 import type { Message } from "$lib/types/Message";
 import type { Assistant } from "$lib/types/Assistant";
+import type { ImageAspect, ImageSizeTier } from "$lib/imageGeneration";
 
 export interface TextGenerationContext {
 	model: ProcessedModel;
@@ -25,6 +26,10 @@ export interface TextGenerationContext {
 	reasoningOverride?: boolean;
 	/** Per-model user override for artifacts; wins over the model's supportsArtifacts flag in both directions */
 	artifactsOverride?: boolean;
+	/** Image models only: size tier (1K/2K/4K) the user picked for this model */
+	imageSize?: ImageSizeTier;
+	/** Image models only: aspect ratio the user picked for this model */
+	imageAspect?: ImageAspect;
 	locals: App.Locals | undefined;
 	abortController: AbortController;
 	/** Also identifies the audience for an MCP elicitation raised mid tool call. */

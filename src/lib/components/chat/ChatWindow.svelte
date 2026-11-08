@@ -36,6 +36,7 @@
 	import { base } from "$app/paths";
 	import ChatMessage from "./ChatMessage.svelte";
 	import ThinkingEffortChip from "./ThinkingEffortChip.svelte";
+	import ImageSizeChip from "./ImageSizeChip.svelte";
 	import ScrollToBottomBtn from "../ScrollToBottomBtn.svelte";
 	import ScrollToPreviousBtn from "../ScrollToPreviousBtn.svelte";
 	import { browser } from "$app/environment";
@@ -1207,7 +1208,11 @@
 							>{publicConfig.PUBLIC_CAVEAT || "Generated content may be inaccurate or false."}</span
 						>
 					{/if}
-					{#if $settings.reasoningOverrides?.[currentModel.id] ?? currentModel.supportsReasoning}
+					{#if currentModel.imageGeneration}
+						<div class="ml-auto">
+							<ImageSizeChip modelId={currentModel.id} />
+						</div>
+					{:else if $settings.reasoningOverrides?.[currentModel.id] ?? currentModel.supportsReasoning}
 						<div class="ml-auto">
 							<ThinkingEffortChip
 								modelId={currentModel.id}

@@ -3,6 +3,7 @@ import { useAPIClient, handleResponse } from "$lib/APIClient";
 import { getConfigManager } from "$lib/utils/PublicConfig.svelte";
 import type { GETModelsResponse, FeatureFlags } from "$lib/server/api/types";
 import { base } from "$app/paths";
+import type { ImageAspect, ImageSizeTier } from "$lib/imageGeneration";
 
 interface ConversationListItem {
 	_id: { toString(): string };
@@ -38,6 +39,8 @@ interface SettingsResponse {
 	providerOverrides: Record<string, string>;
 	reasoningEffortOverrides: Record<string, "low" | "medium" | "high">;
 	reasoningOverrides: Record<string, boolean>;
+	imageSizeOverrides: Record<string, ImageSizeTier>;
+	imageAspectOverrides: Record<string, ImageAspect>;
 	billingOrganization?: string;
 }
 

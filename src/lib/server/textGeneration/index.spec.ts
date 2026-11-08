@@ -12,10 +12,14 @@ import type { TextGenerationContext } from "./types";
 const mocks = vi.hoisted(() => ({
 	runMcpFlow: vi.fn(),
 	generate: vi.fn(),
+	generateImage: vi.fn(),
 }));
 
 vi.mock("./mcp/runMcpFlow", () => ({ runMcpFlow: mocks.runMcpFlow }));
 vi.mock("./generate", () => ({ generate: mocks.generate }));
+vi.mock("$lib/server/imageGeneration/openaiImages", () => ({
+	generateImage: mocks.generateImage,
+}));
 // eslint-disable-next-line require-yield
 async function* noUpdates() {
 	return undefined;
@@ -145,5 +149,28 @@ describe("textGeneration MCP fallback", () => {
 		await collect(ctx);
 
 		expect(mocks.generate).not.toHaveBeenCalled();
+	});
+});
+
+describe("textGeneration image models", () => {
+	it("routes image models to the Image API path and skips MCP and chat generation", async () => {
+		const FILE_UPDATE: MessageUpdate = {
+			type: MessageUpdateType.File,
+			name: "out.png",
+			sha: "abc",
+			mime: "image/png",
+		};
+		mocks.generateImage.mockImplementation(async function* () {
+			yield FILE_UPDATE;
+		});
+		const ctx = makeContext();
+		(ctx.model as unknown as { imageGeneration: boolean }).imageGeneration = true;
+
+		const updates = await collect(ctx);
+
+		expect(mocks.generateImage).toHaveBeenCalledTimes(1);
+		expect(mocks.runMcpFlow).not.toHaveBeenCalled();
+		expect(mocks.generate).not.toHaveBeenCalled();
+		expect(updates).toContainEqual(FILE_UPDATE);
 	});
 });

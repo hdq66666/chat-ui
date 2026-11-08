@@ -492,7 +492,7 @@
 			{#if message.files?.length}
 				<div class="flex h-fit flex-wrap gap-x-5 gap-y-2">
 					{#each message.files as file (file.value)}
-						<UploadedFile {file} canClose={false} />
+						<UploadedFile {file} canClose={false} large={file.mime.startsWith("image/")} />
 					{/each}
 				</div>
 			{/if}

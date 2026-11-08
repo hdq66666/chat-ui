@@ -8,6 +8,7 @@ import JSON5 from "json5";
 import { logger } from "$lib/server/logger";
 import { preservesReasoningByDefault } from "$lib/server/reasoningPolicy";
 import { makeRouterEndpoint } from "$lib/server/router/endpoint";
+import { imageBaseUrl, imageModelIds } from "$lib/server/imageGeneration/config";
 
 type Optional<T, K extends keyof T> = Pick<Partial<T>, K> & Omit<T, K>;
 
@@ -87,6 +88,11 @@ const modelConfig = z.object({
 	// Opt-in artifacts: when true, the model is instructed to emit <artifact>
 	// blocks rendered in the side panel. Set per model via MODELS overrides.
 	supportsArtifacts: z.boolean().default(false),
+	/**
+	 * OpenAI Image API model (OPENAI_IMAGE_MODELS): turns go to /images/generations or
+	 * /images/edits instead of chat completions. Not settable through MODELS overrides.
+	 */
+	imageGeneration: z.boolean().default(false),
 	unlisted: z.boolean().default(false),
 	embeddingModel: z.never().optional(),
 	/** Used to enable/disable system prompt usage */
@@ -164,9 +170,15 @@ const processModel = async (m: ModelConfig) => ({
 	unlisted: m.unlisted ?? false,
 });
 
+/** Image models never stream chat completions; textGeneration branches on the flag first. */
+const imageModelEndpoint: Endpoint = async () => {
+	throw new Error("Image generation models have no chat completions endpoint");
+};
+
 const addEndpoint = (m: Awaited<ReturnType<typeof processModel>>) => ({
 	...m,
 	getEndpoint: async (): Promise<Endpoint> => {
+		if (m.imageGeneration) return imageModelEndpoint;
 		if (!m.endpoints || m.endpoints.length === 0) {
 			throw new Error("No endpoints configured. This build requires OpenAI-compatible endpoints.");
 		}
@@ -317,6 +329,29 @@ const buildModels = async (): Promise<ProcessedModel[]> => {
 			} as ModelConfig;
 		}) as ModelConfig[];
 
+		// OpenAI Image API models are not in OPENAI_BASE_URL/models (that is the local
+		// proxy), so they are appended here. Appending keeps models[0] the default/task model.
+		const listedIds = new Set(modelsRaw.map((m) => m.id));
+		for (const id of imageModelIds()) {
+			if (listedIds.has(id)) {
+				logger.warn({ id }, "[models] image model id already served by OPENAI_BASE_URL; skipped");
+				continue;
+			}
+			modelsRaw.push({
+				id,
+				name: id,
+				displayName: id,
+				description: "OpenAI image generation. Attach images to edit them.",
+				multimodal: true,
+				multimodalAcceptedMimetypes: ["image/*"],
+				supportsTools: false,
+				supportsReasoning: false,
+				preservesReasoning: false,
+				imageGeneration: true,
+				endpoints: [{ type: "openai" as const, baseURL: imageBaseUrl() }],
+			} as ModelConfig);
+		}
+
 		const overrides = getModelOverrides();
 
 		if (overrides.length) {
@@ -339,6 +374,8 @@ const buildModels = async (): Promise<ProcessedModel[]> => {
 				return {
 					...model,
 					...rest,
+					// The request path is decided by OPENAI_IMAGE_MODELS, not by overrides
+					imageGeneration: model.imageGeneration ?? false,
 				};
 			});
 		}

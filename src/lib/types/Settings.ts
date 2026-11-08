@@ -1,6 +1,7 @@
 import { defaultModel } from "$lib/server/models";
 import type { Timestamps } from "./Timestamps";
 import type { User } from "./User";
+import type { ImageAspect, ImageSizeTier } from "$lib/imageGeneration";
 
 export type StreamingMode = "raw" | "smooth";
 export type ReasoningEffort = "low" | "medium" | "high";
@@ -68,6 +69,11 @@ export interface Settings extends Timestamps {
 	 */
 	reasoningOverrides?: Record<string, boolean>;
 
+	/** Per image-generation model: size tier (1K/2K/4K). Missing = 1K. */
+	imageSizeOverrides?: Record<string, ImageSizeTier>;
+	/** Per image-generation model: aspect ratio. Missing = 1:1. */
+	imageAspectOverrides?: Record<string, ImageAspect>;
+
 	/**
 	 * Preferred assistant output behavior in the chat UI.
 	 * - "raw": show provider-native stream chunks
@@ -104,6 +110,8 @@ export const DEFAULT_SETTINGS = {
 	providerOverrides: {},
 	reasoningEffortOverrides: {},
 	reasoningOverrides: {},
+	imageSizeOverrides: {},
+	imageAspectOverrides: {},
 	streamingMode: "smooth",
 	directPaste: false,
 	hapticsEnabled: true,

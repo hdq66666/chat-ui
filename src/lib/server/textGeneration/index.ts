@@ -12,6 +12,7 @@ import { mergeAsyncGenerators } from "$lib/utils/mergeAsyncGenerators";
 import type { TextGenerationContext } from "./types";
 import { isMlAssistantConversation } from "$lib/server/mlAssistant";
 import { resolvePreprompt } from "./preprompt";
+import { generateImage } from "$lib/server/imageGeneration/openaiImages";
 
 /** Updates that mean the user has already been shown something for this turn. */
 function isVisibleWork(update: MessageUpdate): boolean {
@@ -53,6 +54,16 @@ async function* textGenerationWithoutTitle(
 		type: MessageUpdateType.Status,
 		status: MessageUpdateStatus.Started,
 	};
+
+	// OpenAI Image API models have no chat endpoint, tools or preprompt
+	if (ctx.model.imageGeneration) {
+		try {
+			yield* generateImage(ctx);
+		} finally {
+			done.abort();
+		}
+		return;
+	}
 
 	const { conv, messages } = ctx;
 	const convId = conv._id;

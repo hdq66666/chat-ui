@@ -696,6 +696,12 @@ export async function POST({ request, locals, params, getClientAddress }) {
 					// Artifacts aren't provider-determined, so the per-model user
 					// override applies on HuggingChat too
 					artifactsOverride: userSettings?.artifactsOverrides?.[model.id],
+					imageSize: model.imageGeneration
+						? userSettings?.imageSizeOverrides?.[model.id]
+						: undefined,
+					imageAspect: model.imageGeneration
+						? userSettings?.imageAspectOverrides?.[model.id]
+						: undefined,
 					locals,
 					abortController: ctrl,
 					generationId: effectiveGenerationId,

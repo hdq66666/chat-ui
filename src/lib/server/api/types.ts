@@ -20,6 +20,8 @@ export type GETModelsResponse = Array<{
 	supportsTools: boolean;
 	supportsReasoning: boolean;
 	supportsArtifacts: boolean;
+	/** OpenAI Image API model: replies are images; shows the size picker */
+	imageGeneration: boolean;
 	unlisted: boolean;
 	hasInferenceAPI: boolean;
 	isRouter: boolean;

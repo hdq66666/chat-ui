@@ -17,9 +17,11 @@
 		file: MessageFile;
 		canClose?: boolean;
 		onclose?: () => void;
+		/** Generated images: show a large preview at the image's own aspect ratio */
+		large?: boolean;
 	}
 
-	let { file, canClose = true, onclose }: Props = $props();
+	let { file, canClose = true, onclose, large = false }: Props = $props();
 
 	let showModal = $state(false);
 
@@ -192,6 +194,17 @@
 					src={heicPreview}
 					alt={file.name}
 					class="h-36 bg-gray-200 object-cover dark:bg-gray-800"
+				/>
+			</div>
+		{:else if isDisplayableImage(file.mime) && large}
+			<div class="overflow-hidden rounded-xl">
+				<img
+					src={file.type === "base64"
+						? `data:${file.mime};base64,${file.value}`
+						: urlNotTrailing + "/output/" + file.value}
+					alt={file.name}
+					loading="lazy"
+					class="max-h-[32rem] w-auto max-w-full bg-gray-200 object-contain dark:bg-gray-800"
 				/>
 			</div>
 		{:else if isDisplayableImage(file.mime)}
