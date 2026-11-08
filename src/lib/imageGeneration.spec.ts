@@ -10,7 +10,10 @@ import {
 	isImageComplexity,
 	isMarkupFileName,
 	markupFileNameFor,
-	markupTargetName,
+	markupTagOf,
+	markupTagOfTarget,
+	markupTargetNameFor,
+	newMarkupTag,
 	resolveImageDimensions,
 } from "./imageGeneration";
 
@@ -70,12 +73,21 @@ describe("image size tiers", () => {
 		expect(isImageComplexity(undefined)).toBe(false);
 	});
 
-	it("names markup layers after their image and reads the target back", () => {
-		const name = markupFileNameFor("IMG_0001.HEIC");
-		expect(isMarkupFileName(name)).toBe(true);
-		expect(markupTargetName(name)).toBe("IMG_0001.HEIC");
-		expect(isMarkupFileName("IMG_0001.HEIC")).toBe(false);
-		expect(markupTargetName("photo.png")).toBeUndefined();
+	it("pairs a markup layer with its image through a shared tag", () => {
+		const tag = newMarkupTag();
+		expect(tag).toMatch(/^[0-9a-f]{12}$/);
+		const layer = markupFileNameFor(tag);
+		expect(isMarkupFileName(layer)).toBe(true);
+		expect(markupTagOf(layer)).toBe(tag);
+		expect(markupTagOf("photo.png")).toBeUndefined();
+
+		const target = markupTargetNameFor(tag, "IMG_0001.HEIC");
+		expect(target).toBe(`mk-${tag}-IMG_0001.HEIC`);
+		// the server stores HEIC as .jpg; the tag is a prefix, so it survives
+		expect(markupTagOfTarget(target.replace(/\.HEIC$/, ".jpg"))).toBe(tag);
+		// marking the same image again replaces the tag instead of stacking it
+		expect(markupTargetNameFor("bbbbbbbbbbbb", target)).toBe("mk-bbbbbbbbbbbb-IMG_0001.HEIC");
+		expect(markupTagOfTarget("image.png")).toBeUndefined();
 	});
 
 	it("formats markup notes numbered like the badges", () => {

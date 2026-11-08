@@ -96,24 +96,42 @@ export function resolveImageDimensions(
  * 标记引导编辑（GPT Image 2.6 的 markup）：在被编辑的图上画圈、箭头、编号，
  * 作为一张同尺寸的透明 PNG 图层随 /images/edits 的 `markup` 字段发送，原图不压平。
  *
- * 前端把图层作为普通 PNG 附件发出，用保留的文件名前缀标出它是图层、以及画在哪张图上：
- * `chatui-markup-<被标记图片的文件名>.png`。服务端据此把它从参考图里拿出来、
- * 把被标记的图排到第一张（API 规定第一张是被编辑的图）。
+ * 前端确认标记时生成一个短标签 tag：被标记的图改名为 `mk-<tag>-<原文件名>`，
+ * 图层叫 `chatui-markup-<tag>.png`。服务端按标签配对、把被标记的图排到第一张
+ * （API 规定第一张是被编辑的图）。不按原文件名配对：粘贴的截图都叫 image.png、
+ * 同尺寸的生成图同名，而 HEIC 存储时会被改成 .jpg —— 标签是前缀，改扩展名不影响。
  */
 export const MARKUP_FILE_PREFIX = "chatui-markup-";
+const TARGET_PREFIX = /^mk-([a-z0-9]{6,16})-/;
 
-export function markupFileNameFor(targetName: string): string {
-	return `${MARKUP_FILE_PREFIX}${targetName}.png`;
+export function newMarkupTag(): string {
+	const bytes = new Uint8Array(6);
+	globalThis.crypto.getRandomValues(bytes);
+	return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+export function markupFileNameFor(tag: string): string {
+	return `${MARKUP_FILE_PREFIX}${tag}.png`;
 }
 
 export function isMarkupFileName(name: string | undefined): boolean {
 	return typeof name === "string" && name.startsWith(MARKUP_FILE_PREFIX);
 }
 
-/** 图层画在哪张图上；不是图层文件时返回 undefined。 */
-export function markupTargetName(name: string): string | undefined {
-	if (!isMarkupFileName(name)) return undefined;
-	return name.slice(MARKUP_FILE_PREFIX.length).replace(/\.png$/i, "");
+/** 图层的标签；不是图层文件时返回 undefined。 */
+export function markupTagOf(layerName: string): string | undefined {
+	if (!isMarkupFileName(layerName)) return undefined;
+	return layerName.slice(MARKUP_FILE_PREFIX.length).replace(/\.png$/i, "") || undefined;
+}
+
+/** 被标记图片的文件名：去掉旧标签再加新标签，重复标记同一张图时不会叠前缀。 */
+export function markupTargetNameFor(tag: string, originalName: string): string {
+	return `mk-${tag}-${originalName.replace(TARGET_PREFIX, "")}`;
+}
+
+/** 这张图的标签（不是被标记的图时返回 undefined）。 */
+export function markupTagOfTarget(name: string | undefined): string | undefined {
+	return typeof name === "string" ? TARGET_PREFIX.exec(name)?.[1] : undefined;
 }
 
 /**

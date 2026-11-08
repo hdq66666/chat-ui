@@ -838,7 +838,9 @@
 				type="button"
 				class="inline-flex items-center gap-1.5 rounded-xl border border-gray-900 bg-gray-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-black focus:ring-2 focus:ring-gray-400 focus:ring-offset-2 focus:outline-hidden disabled:opacity-60 dark:border-gray-100 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white dark:focus:ring-offset-gray-800"
 				disabled={!image ||
-					(exportMode === "overlay" && annotations.length === 0 && comments.length === 0)}
+					(exportMode === "overlay" &&
+						annotations.length === 0 &&
+						!comments.some((comment) => comment.note.trim()))}
 				onclick={confirm}
 			>
 				{confirmLabel}

@@ -22,7 +22,8 @@ import {
 	imageSizeViolation,
 	isImageComplexity,
 	isMarkupFileName,
-	markupTargetName,
+	markupTagOf,
+	markupTagOfTarget,
 	resolveImageDimensions,
 } from "$lib/imageGeneration";
 import { MessageUpdateType, type MessageUpdate } from "$lib/types/MessageUpdate";
@@ -41,6 +42,8 @@ import type { TextGenerationContext } from "$lib/server/textGeneration/types";
 const EDIT_INPUT_MAX_EDGE = 3840;
 const EDIT_INPUT_MIME = ["image/png", "image/jpeg", "image/webp"] as const;
 const EDIT_INPUT_MAX_IMAGES = 16;
+/** 官方：首图和图层各不超过 16,777,216 像素 */
+const MARKUP_MAX_PIXELS = 16_777_216;
 
 let dispatcher: Agent | undefined;
 let dispatcherTimeout = 0;
@@ -137,7 +140,11 @@ async function autoOrient(file: MessageFile): Promise<MessageFile> {
 	if (needsHeifDecoder(buffer, file.mime)) return file;
 	const meta = await sharp(buffer).metadata();
 	if (!meta.orientation || meta.orientation === 1) return file;
-	const rotated = await sharp(buffer).rotate().toBuffer();
+	// JPEG 默认 q80 会再损失一次画质，这里用 95；其他格式保持原格式
+	const rotated =
+		meta.format === "jpeg"
+			? await sharp(buffer).rotate().jpeg({ quality: 95 }).toBuffer()
+			: await sharp(buffer).rotate().toBuffer();
 	return { ...file, value: rotated.toString("base64") };
 }
 
@@ -148,8 +155,8 @@ async function loadEditInputs(ctx: TextGenerationContext) {
 	const markupFile = all.find((f) => isMarkupFileName(f.name));
 	let images = all.filter((f) => !isMarkupFileName(f.name));
 	if (markupFile) {
-		const target = markupTargetName(markupFile.name);
-		const i = images.findIndex((f) => f.name === target);
+		const tag = markupTagOf(markupFile.name);
+		const i = tag ? images.findIndex((f) => markupTagOfTarget(f.name) === tag) : -1;
 		// 图层必须叠在它画的那张图上；找不到就不发，免得叠到别的图上
 		if (i < 0) return { inputs: [], markup: undefined, markupTargetMissing: true, skipped: 0 };
 		if (i > 0) images = [images[i], ...images.slice(0, i), ...images.slice(i + 1)];
@@ -173,7 +180,10 @@ async function loadEditInputs(ctx: TextGenerationContext) {
 		const { width, height } = await sharp(inputs[0].buffer).metadata();
 		if (!width || !height) throw new Error("读不出被编辑图片的尺寸");
 		const raw = await loadFile(ctx, markupFile);
-		const buffer = await sharp(Buffer.from(raw.value, "base64"))
+		// 和 API 的单图上限一致，防止一张声明超大尺寸的 PNG 解码时吃掉大量内存
+		const buffer = await sharp(Buffer.from(raw.value, "base64"), {
+			limitInputPixels: MARKUP_MAX_PIXELS,
+		})
 			.resize(width, height, { fit: "fill" })
 			.ensureAlpha()
 			.png()

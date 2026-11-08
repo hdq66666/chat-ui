@@ -44,7 +44,10 @@
 		formatMarkupNotes,
 		isMarkupFileName,
 		markupFileNameFor,
-		markupTargetName,
+		markupTagOf,
+		markupTagOfTarget,
+		markupTargetNameFor,
+		newMarkupTag,
 	} from "$lib/imageGeneration";
 	import ScrollToBottomBtn from "../ScrollToBottomBtn.svelte";
 	import ScrollToPreviousBtn from "../ScrollToPreviousBtn.svelte";
@@ -350,10 +353,10 @@
 
 	/**
 	 * Image being marked up for a GPT Image markup-guided edit: a pending
-	 * attachment, or (fromConversation) an image already in the conversation,
-	 * such as a generated one, which gets attached when the markup is confirmed.
+	 * attachment (`file`), or an image already in the conversation, such as a
+	 * generated one (`src`), which gets attached when the markup is confirmed.
 	 */
-	let markupTarget = $state<{ name: string; dataUrl: string; fromConversation?: boolean } | null>(
+	let markupTarget = $state<{ dataUrl: string; file?: File; src?: string; name: string } | null>(
 		null
 	);
 
@@ -367,7 +370,17 @@
 		if (!request) return;
 		markupRequest.set(undefined);
 		if (!currentModel.imageGeneration || shared) return;
-		markupTarget = { name: request.name, dataUrl: request.src, fromConversation: true };
+		markupTarget = { dataUrl: request.src, src: request.src, name: request.name };
+	});
+
+	// A layer only means something to an image model; a chat model would just
+	// receive a transparent PNG, so drop layers when switching away.
+	$effect(() => {
+		if (currentModel.imageGeneration) return;
+		const current = untrack(() => files);
+		if (current.some((f) => isMarkupFileName(f.name))) {
+			files = current.filter((f) => !isMarkupFileName(f.name));
+		}
 	});
 
 	async function fetchAsFile(src: string, name: string): Promise<File | undefined> {
@@ -381,39 +394,34 @@
 		}
 	}
 
-	// The API edits the first image and takes the markup layer separately, so the
-	// marked image moves to the front and one layer (the latest) is kept.
+	// The API edits the first image and takes the markup layer separately. The
+	// marked image and its layer share a fresh tag (names alone collide: pasted
+	// screenshots are all image.png, and the server renames HEIC to .jpg), the
+	// image moves to the front, and only the latest layer is kept.
 	async function applyMarkup(layerDataUrl: string, notes: string[]) {
 		const target = markupTarget;
 		markupTarget = null;
 		if (!target) return;
-		let images = files.filter((f) => !isMarkupFileName(f.name));
-		let i = images.findIndex((f) => f.name === target.name);
-		if (i < 0 && target.fromConversation) {
-			const file = await fetchAsFile(target.dataUrl, target.name);
-			if (!file) {
-				error.set("Could not load that image for editing.");
-				return;
-			}
-			images = [file, ...files.filter((f) => !isMarkupFileName(f.name))];
-			i = 0;
+		const source =
+			target.file ?? (target.src ? await fetchAsFile(target.src, target.name) : undefined);
+		if (!source) {
+			error.set("Could not load that image for editing.");
+			return;
 		}
-		if (i < 0) return;
-		files = [
-			images[i],
-			...images.filter((_, j) => j !== i),
-			pngDataUrlToFile(layerDataUrl, markupFileNameFor(target.name)),
-		];
+		const tag = newMarkupTag();
+		const marked = new File([source], markupTargetNameFor(tag, source.name), {
+			type: source.type,
+		});
+		const others = files.filter((f) => f !== target.file && !isMarkupFileName(f.name));
+		files = [marked, ...others, pngDataUrlToFile(layerDataUrl, markupFileNameFor(tag))];
 		const text = formatMarkupNotes(notes);
 		if (text) draft = draft.trim() ? `${draft}\n\n${text}` : text;
 	}
 
 	function removePendingFile(index: number) {
-		const removed = files[index];
+		const tag = markupTagOfTarget(files[index]?.name);
 		files = files.filter(
-			(f, i) =>
-				i !== index &&
-				!(removed && isMarkupFileName(f.name) && markupTargetName(f.name) === removed.name)
+			(f, i) => i !== index && !(tag && isMarkupFileName(f.name) && markupTagOf(f.name) === tag)
 		);
 	}
 
@@ -1039,7 +1047,7 @@
 								file={src}
 								onclose={() => removePendingFile(index)}
 								onannotate={currentModel.imageGeneration
-									? (dataUrl) => (markupTarget = { name: src.name, dataUrl })
+									? (dataUrl) => (markupTarget = { dataUrl, file: files[index], name: src.name })
 									: undefined}
 							/>
 						{/await}

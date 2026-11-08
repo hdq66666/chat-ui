@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ObjectId } from "mongodb";
 import { MessageUpdateType, type MessageUpdate } from "$lib/types/MessageUpdate";
-import { markupFileNameFor } from "$lib/imageGeneration";
+import { markupFileNameFor, markupTargetNameFor } from "$lib/imageGeneration";
 import sharp from "sharp";
 import type { TextGenerationContext } from "$lib/server/textGeneration/types";
 
@@ -288,12 +288,17 @@ describe("generateImage", () => {
 					content: "recolor the circled vase",
 					files: [
 						{ type: "hash", value: "sha-other", mime: "image/png", name: "other.png" },
-						{ type: "hash", value: "sha-target", mime: "image/png", name: "vase.png" },
+						{
+							type: "hash",
+							value: "sha-target",
+							mime: "image/png",
+							name: markupTargetNameFor("aaaaaaaaaaaa", "vase.png"),
+						},
 						{
 							type: "hash",
 							value: "sha-markup",
 							mime: "image/png",
-							name: markupFileNameFor("vase.png"),
+							name: markupFileNameFor("aaaaaaaaaaaa"),
 						},
 					],
 				})
@@ -333,12 +338,17 @@ describe("generateImage", () => {
 			await collect(
 				ctx({
 					files: [
-						{ type: "hash", value: "sha-photo", mime: "image/jpeg", name: "photo.jpg" },
+						{
+							type: "hash",
+							value: "sha-photo",
+							mime: "image/jpeg",
+							name: markupTargetNameFor("cccccccccccc", "photo.jpg"),
+						},
 						{
 							type: "hash",
 							value: "sha-m",
 							mime: "image/png",
-							name: markupFileNameFor("photo.jpg"),
+							name: markupFileNameFor("cccccccccccc"),
 						},
 					],
 				})
@@ -347,6 +357,37 @@ describe("generateImage", () => {
 			const [w, h] = await partSize(form.get("image[]"));
 			expect([w, h]).toEqual([40, 80]);
 			expect(await partSize(form.get("markup"))).toEqual([40, 80, true]);
+		});
+
+		it("pairs by tag when names collide and when HEIC was stored as .jpg", async () => {
+			const first = await png(64, 48);
+			const marked = await png(96, 64);
+			serve({ "sha-1": first, "sha-2": marked, "sha-m": await png(48, 32, true) });
+			mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
+			await collect(
+				ctx({
+					files: [
+						// two pasted screenshots are both called image.png
+						{ type: "hash", value: "sha-1", mime: "image/png", name: "image.png" },
+						// the marked one: uploaded as mk-<tag>-IMG_1.HEIC, stored as .jpg
+						{
+							type: "hash",
+							value: "sha-2",
+							mime: "image/png",
+							name: markupTargetNameFor("eeeeeeeeeeee", "IMG_1.jpg"),
+						},
+						{
+							type: "hash",
+							value: "sha-m",
+							mime: "image/png",
+							name: markupFileNameFor("eeeeeeeeeeee"),
+						},
+					],
+				})
+			);
+			const form = mocks.fetch.mock.calls[0][1].body as FormData;
+			expect(await partSize(form.getAll("image[]")[0])).toEqual([96, 64, false]);
+			expect(await partSize(form.get("markup"))).toEqual([96, 64, true]);
 		});
 
 		it("refuses a layer whose image is not in the message", async () => {
@@ -359,7 +400,7 @@ describe("generateImage", () => {
 							type: "hash",
 							value: "sha-m",
 							mime: "image/png",
-							name: markupFileNameFor("gone.png"),
+							name: markupFileNameFor("dddddddddddd"),
 						},
 					],
 				})
