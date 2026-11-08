@@ -21,6 +21,27 @@ function hasLiveTurn(messages: Message[]) {
 	});
 }
 
+/**
+ * Turn states every pod writes. A `running` row is only trusted while its run's generation record
+ * is still running: the reaper and a crashed or failed run leave the row at `running` but move the
+ * generation on, and a stale row must not make the conversation undeletable. Parked turns
+ * (`waiting`, `awaiting_input`) count as live; abandoning them is handled elsewhere.
+ */
+async function hasLiveTurnState(conversationId: ObjectId) {
+	const rows = await collections.turnStates
+		.find({ conversationId, status: { $in: ["running", "waiting", "awaiting_input"] } })
+		.toArray();
+	for (const row of rows) {
+		if (row.status !== "running") return true;
+		const run = await collections.generations.findOne({
+			generationId: row.producerId,
+			status: "running",
+		});
+		if (run) return true;
+	}
+	return false;
+}
+
 /** Files only the removed messages referenced. Shares keep their own copies. */
 function unreferencedShas(removed: Message[], remaining: Message[]) {
 	const shas = (messages: Message[]) =>
@@ -52,11 +73,11 @@ export const DELETE: RequestHandler = async ({ locals, params, url }) => {
 	// A run rewrites the whole messages array when it saves, which would bring deleted messages back.
 	// Three signals: a send on this pod (from before its first read to its last save), the turn
 	// states every pod writes (before the run's first save), and the states saved in the messages.
-	const liveTurnState = await collections.turnStates.findOne({
-		conversationId: convId,
-		status: { $in: ["running", "waiting", "awaiting_input"] },
-	});
-	if (AbortRegistry.getInstance().isBusy(id) || liveTurnState || hasLiveTurn(conv.messages)) {
+	if (
+		AbortRegistry.getInstance().isBusy(id) ||
+		(await hasLiveTurnState(convId)) ||
+		hasLiveTurn(conv.messages)
+	) {
 		error(409, "A reply is still being generated in this conversation. Delete after it finishes.");
 	}
 

@@ -381,6 +381,18 @@ describe.sequential("DELETE /api/v2/conversations/[id]/message/[messageId]", () 
 			createdAt: new Date(),
 			updatedAt: new Date(),
 		} as never);
+		await collections.generations.insertOne({
+			_id: new ObjectId(),
+			generationId: "other-pod",
+			conversationId: conv._id,
+			messageId: t.id.a3,
+			status: "running",
+			seq: 0,
+			lastHeartbeatAt: new Date(),
+			startedAt: new Date(),
+			createdAt: new Date(),
+			updatedAt: new Date(),
+		});
 		try {
 			expect(await statusOf(callDelete(locals, conv._id.toString(), t.id.u2))).toBe(409);
 			await collections.turnStates.updateOne(
@@ -390,6 +402,54 @@ describe.sequential("DELETE /api/v2/conversations/[id]/message/[messageId]", () 
 			expect(await statusOf(callDelete(locals, conv._id.toString(), t.id.u2))).toBe(200);
 		} finally {
 			await collections.turnStates.deleteMany({ conversationId: conv._id });
+			await collections.generations.deleteMany({ conversationId: conv._id });
+		}
+	});
+
+	it("trusts a running turn state only while its generation is running", async () => {
+		const { locals } = await createTestUser();
+		const t = linearTree();
+		// the reaper finished this run after a crash: message interrupted, generation interrupted,
+		// but the turn state row was never moved off "running"
+		const reaped = t.messages.map((m) => (m.id === t.id.a3 ? { ...m, interrupted: true } : m));
+		const conv = await createTestConversation(locals, {
+			messages: reaped,
+			rootMessageId: t.rootMessageId,
+		});
+		const id = conv._id.toString();
+		const now = new Date();
+		await collections.turnStates.insertOne({
+			conversationId: conv._id,
+			messageId: t.id.a3,
+			status: "running",
+			producerId: "gen-1",
+			createdAt: now,
+			updatedAt: now,
+		} as never);
+		await collections.generations.insertOne({
+			_id: new ObjectId(),
+			generationId: "gen-1",
+			conversationId: conv._id,
+			messageId: t.id.a3,
+			status: "running",
+			seq: 0,
+			lastHeartbeatAt: now,
+			startedAt: now,
+			createdAt: now,
+			updatedAt: now,
+		});
+		try {
+			// while the generation itself is still running, the row is trusted
+			expect(await statusOf(callDelete(locals, id, t.id.u2))).toBe(409);
+			await collections.generations.updateOne(
+				{ generationId: "gen-1" },
+				{ $set: { status: "interrupted" } }
+			);
+			// stale row: the conversation stays deletable
+			expect(await statusOf(callDelete(locals, id, t.id.u2))).toBe(200);
+		} finally {
+			await collections.turnStates.deleteMany({ conversationId: conv._id });
+			await collections.generations.deleteMany({ conversationId: conv._id });
 		}
 	});
 
