@@ -86,7 +86,7 @@ describe("deleteTurn", () => {
 		expect(() => assertConsistent(after)).not.toThrow();
 	});
 
-	it("removes one reply version and its branch with scope 'reply'", () => {
+	it("removes the prompt and every reply version, from whichever version it is started", () => {
 		const conv = tree([
 			["s", "system"],
 			["u1", "user", "s"],
@@ -94,14 +94,16 @@ describe("deleteTurn", () => {
 			["u2", "user", "a1x"],
 			["a1y", "assistant", "u1"],
 		]);
-		const info = describeTurnDeletion(conv, "a1x");
-		expect(info.reply).toEqual({ id: "a1x", count: 2 });
-		const { messages, fallbackId } = deleteTurn(conv, "a1x", "reply");
-		expect(messages.map((m) => m.id)).toEqual(["s", "u1", "a1y"]);
-		expect(messages.find((m) => m.id === "u1")?.children).toEqual(["a1y"]);
-		expect(fallbackId).toBe("u1");
-		// the only reply of a prompt cannot be removed on its own
-		expect(() => deleteTurn(linear(), "a2", "reply")).toThrow(DeleteTurnError);
+		expect(describeTurnDeletion(conv, "a1y").replyCount).toBe(2);
+		for (const from of ["u1", "a1x", "a1y"]) {
+			const { messages, removed, fallbackId } = deleteTurn(conv, from, "turn");
+			expect(removed.map((m) => m.id)).toEqual(["u1", "a1x", "a1y"]);
+			// u2 continued from the a1x version; it is kept and moves up to the system message
+			expect(messages.map((m) => m.id)).toEqual(["s", "u2"]);
+			expect(messages.find((m) => m.id === "u2")?.ancestors).toEqual(["s"]);
+			expect(fallbackId).toBe("s");
+		}
+		expect(() => deleteTurn(conv, "a1x", "reply" as never)).toThrow(DeleteTurnError);
 	});
 
 	it("describes what each choice removes", () => {

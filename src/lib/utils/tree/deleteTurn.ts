@@ -3,7 +3,8 @@ import type { Tree, TreeId, TreeNode } from "./tree";
 /**
  * Deleting messages from a conversation tree.
  *
- * The unit is a turn: a user message and all of its direct replies (retries included). Removing a
+ * The unit is a turn: a user message and all of its direct replies (retries included). Delete on
+ * any reply version removes the prompt and every version, never one version alone. Removing a
  * single user message would leave replies without a prompt, and removing the only reply would
  * leave a prompt that cannot be retried; both break the user/assistant alternation that chat
  * templates and the image follow-up logic rely on. Scopes:
@@ -13,13 +14,11 @@ import type { Tree, TreeId, TreeNode } from "./tree";
  *   from a history that no longer contains the turn. Same model as Open WebUI's message delete
  *   (removes the message and its direct children, reparents the grandchildren).
  * - "after": remove the turn and everything after it on its branches.
- * - "reply": remove one reply version and the branch that continues from it, when the prompt has
- *   other reply versions (retries) left.
  *
  * Every remaining message keeps its `ancestors` as a root path (removed ids filtered out) and its
  * `children` list without removed ids; the result is checked for consistency before returning.
  */
-export type DeleteScope = "turn" | "after" | "reply";
+export type DeleteScope = "turn" | "after";
 
 type Node = TreeNode<{ from: string }>;
 
@@ -37,12 +36,10 @@ export interface TurnDeletionInfo {
 	userId: TreeId;
 	/** The message the turn hangs from (system root or the previous reply) */
 	parentId: TreeId;
-	/** Reply versions of the turn */
+	/** Reply versions of the turn (all are removed) */
 	replyCount: number;
 	/** Messages after the turn (all branches) */
 	laterCount: number;
-	/** Set when called on a reply that has sibling versions: what "reply" would remove */
-	reply?: { id: TreeId; count: number };
 }
 
 function byId<T extends Node>(messages: readonly T[]) {
@@ -78,16 +75,7 @@ export function describeTurnDeletion<T extends Node>(
 
 	const replies = (user.children ?? []).filter((id) => map.has(id));
 	const laterCount = descendantsOf(conv.messages, user.id).length - replies.length;
-	const info: TurnDeletionInfo = {
-		userId: user.id,
-		parentId,
-		replyCount: replies.length,
-		laterCount,
-	};
-	if (msg.from === "assistant" && replies.length > 1) {
-		info.reply = { id: msg.id, count: 1 + descendantsOf(conv.messages, msg.id).length };
-	}
-	return info;
+	return { userId: user.id, parentId, replyCount: replies.length, laterCount };
 }
 
 /**
@@ -104,32 +92,15 @@ export function deleteTurn<T extends Node>(
 	const user = map.get(info.userId) as T;
 	const replies = (user.children ?? []).filter((id) => map.has(id));
 
-	const removed = new Set<TreeId>();
+	const removed = new Set<TreeId>([user.id, ...replies]);
 	let replacement: TreeId[] = [];
-	let detachFrom = info.parentId;
-	let detachId = user.id;
-	let fallbackId = info.parentId;
-
-	if (scope === "reply") {
-		if (!info.reply) {
-			throw new DeleteTurnError("This reply has no other version; delete the turn instead", 400);
-		}
-		removed.add(info.reply.id);
-		for (const m of descendantsOf(conv.messages, info.reply.id)) removed.add(m.id);
-		detachFrom = user.id;
-		detachId = info.reply.id;
-		fallbackId = user.id;
+	if (scope === "after") {
+		for (const m of descendantsOf(conv.messages, user.id)) removed.add(m.id);
+	} else if (scope === "turn") {
+		// the next prompts (after every version) take the turn's place under its parent, in order
+		replacement = replies.flatMap((id) => map.get(id)?.children ?? []);
 	} else {
-		removed.add(user.id);
-		for (const id of replies) removed.add(id);
-		if (scope === "after") {
-			for (const m of descendantsOf(conv.messages, user.id)) removed.add(m.id);
-		} else if (scope === "turn") {
-			// the next prompts take the turn's place under its parent, in order
-			replacement = replies.flatMap((id) => map.get(id)?.children ?? []);
-		} else {
-			throw new DeleteTurnError("Unknown scope", 400);
-		}
+		throw new DeleteTurnError("Unknown scope", 400);
 	}
 
 	const messages = conv.messages
@@ -139,8 +110,8 @@ export function deleteTurn<T extends Node>(
 			if (m.ancestors) next.ancestors = m.ancestors.filter((id) => !removed.has(id));
 			if (m.children) {
 				next.children =
-					m.id === detachFrom
-						? m.children.flatMap((id) => (id === detachId ? replacement : [id]))
+					m.id === info.parentId
+						? m.children.flatMap((id) => (id === user.id ? replacement : [id]))
 						: [...m.children];
 				next.children = next.children.filter((id) => !removed.has(id));
 			}
@@ -148,7 +119,11 @@ export function deleteTurn<T extends Node>(
 		});
 
 	assertConsistent({ rootMessageId: conv.rootMessageId, messages });
-	return { messages, removed: conv.messages.filter((m) => removed.has(m.id)), fallbackId };
+	return {
+		messages,
+		removed: conv.messages.filter((m) => removed.has(m.id)),
+		fallbackId: info.parentId,
+	};
 }
 
 /** Every reference resolves, and parent/child links agree in both directions. */

@@ -10,7 +10,7 @@ import type { Message } from "$lib/types/Message";
 import { turnStateOf } from "$lib/utils/generationState";
 import { deleteTurn, DeleteTurnError, type DeleteScope } from "$lib/utils/tree/deleteTurn";
 
-const SCOPES: readonly DeleteScope[] = ["turn", "after", "reply"];
+const SCOPES: readonly DeleteScope[] = ["turn", "after"];
 
 /** A reply that is running, waiting, or parked for input can still write the conversation. */
 function hasLiveTurn(messages: Message[]) {
@@ -30,10 +30,9 @@ function unreferencedShas(removed: Message[], remaining: Message[]) {
 }
 
 /**
- * Delete a turn (a user message and its replies) or one reply version. `?scope=`:
+ * Delete a turn: a user message and every version of its reply (called on any of them). `?scope=`:
  * - `turn` (default): remove the turn, keep and reattach what came after it
  * - `after`: remove the turn and everything after it
- * - `reply`: remove one reply version and its branch (the prompt has other versions)
  * See $lib/utils/tree/deleteTurn for the tree rules.
  */
 export const DELETE: RequestHandler = async ({ locals, params, url }) => {

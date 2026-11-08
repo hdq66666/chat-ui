@@ -613,13 +613,12 @@
 		});
 	}
 
-	// Deleting a turn (or one reply version). The server refuses while a reply is generating,
+	// Deleting a turn: the prompt and every version of its reply. The server refuses while a reply is generating,
 	// because a run saves the whole message list and would bring deleted messages back.
 	let deleteTarget = $state<{
 		id: Message["id"];
 		info: TurnDeletionInfo;
 		prompt: string;
-		fromReply: boolean;
 	} | null>(null);
 	let deleting = $state(false);
 
@@ -635,7 +634,6 @@
 				id: payload.id,
 				info,
 				prompt: messages.find((m) => m.id === info.userId)?.content ?? "",
-				fromReply: messages.find((m) => m.id === payload.id)?.from === "assistant",
 			};
 		} catch (err) {
 			error.set(err instanceof Error ? err.message : String(err));
@@ -819,7 +817,6 @@
 	<DeleteMessageModal
 		info={deleteTarget.info}
 		prompt={deleteTarget.prompt}
-		fromReply={deleteTarget.fromReply}
 		busy={deleting}
 		onclose={() => (deleteTarget = null)}
 		onconfirm={confirmDeleteMessage}

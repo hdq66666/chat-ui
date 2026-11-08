@@ -235,7 +235,7 @@ describe.sequential("DELETE /api/v2/conversations/[id]/message/[messageId]", () 
 		expect(updated?.updatedAt.getTime()).toBeGreaterThan(conv.updatedAt.getTime() - 1);
 	});
 
-	it("removes one reply version with scope=reply, and refuses it for an only reply", async () => {
+	it("removes every version of a reply when one version is deleted", async () => {
 		const { locals } = await createTestUser();
 		const t = linearTree({ retry: true });
 		const conv = await createTestConversation(locals, {
@@ -244,13 +244,17 @@ describe.sequential("DELETE /api/v2/conversations/[id]/message/[messageId]", () 
 		});
 		const id = conv._id.toString();
 
-		expect(await statusOf(callDelete(locals, id, t.id.a1, "reply"))).toBe(400);
-		await callDelete(locals, id, t.id.a2, "reply");
+		// a2b is the second version of u2's reply; deleting it takes u2, a2 and a2b
+		const res = await callDelete(locals, id, t.id.a2b);
+		const data = await parseResponse<{ removedIds: string[] }>(res);
+		expect(new Set(data.removedIds)).toEqual(new Set([t.id.u2, t.id.a2, t.id.a2b]));
 		const updated = await collections.conversations.findOne({ _id: conv._id });
 		const ids = (updated?.messages ?? []).map((m) => m.id);
-		// a2 and the branch after it are gone; the other version stays
-		expect(ids).toEqual([t.id.s, t.id.u1, t.id.a1, t.id.u2, t.id.a2b]);
-		expect(updated?.messages.find((m) => m.id === t.id.u2)?.children).toEqual([t.id.a2b]);
+		// u3 continued from the a2 version and is kept, after a1
+		expect(ids).toEqual([t.id.s, t.id.u1, t.id.a1, t.id.u3, t.id.a3]);
+		expect(updated?.messages.find((m) => m.id === t.id.a1)?.children).toEqual([t.id.u3]);
+		// a single version can no longer be deleted on its own
+		expect(await statusOf(callDelete(locals, id, t.id.a3, "reply"))).toBe(400);
 	});
 
 	it("refuses while a reply is generating or waiting, and leaves the conversation alone", async () => {

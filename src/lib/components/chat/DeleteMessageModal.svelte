@@ -6,14 +6,12 @@
 		info: TurnDeletionInfo;
 		/** The user message of the turn, shown so the user knows which turn this is */
 		prompt: string;
-		/** True when opened from a reply (offers deleting just that reply version) */
-		fromReply: boolean;
 		busy?: boolean;
 		onclose: () => void;
 		onconfirm: (scope: DeleteScope) => void;
 	}
 
-	let { info, prompt, fromReply, busy = false, onclose, onconfirm }: Props = $props();
+	let { info, prompt, busy = false, onclose, onconfirm }: Props = $props();
 
 	const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 	let preview = $derived(prompt.length > 160 ? `${prompt.slice(0, 160)}…` : prompt);
@@ -22,7 +20,7 @@
 			? "your message"
 			: info.replyCount === 1
 				? "your message and its reply"
-				: `your message and its ${info.replyCount} reply versions`
+				: `your message and all ${info.replyCount} versions of its reply`
 	);
 
 	const buttonClass =
@@ -43,21 +41,6 @@
 		</p>
 
 		<div class="flex flex-col gap-2">
-			{#if fromReply && info.reply}
-				<button
-					type="button"
-					class="{buttonClass} {plainClass}"
-					disabled={busy}
-					onclick={() => onconfirm("reply")}
-				>
-					<span class="font-medium">Delete this reply version</span>
-					<span class="text-xs text-gray-500 dark:text-gray-400">
-						The other {plural(info.replyCount - 1, "version")} stay{info.reply.count > 1
-							? `; the ${plural(info.reply.count - 1, "message")} continuing from this version are removed too`
-							: ""}.
-					</span>
-				</button>
-			{/if}
 			<button
 				type="button"
 				class="{buttonClass} {info.laterCount ? plainClass : dangerClass}"
