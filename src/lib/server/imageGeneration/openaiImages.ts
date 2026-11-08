@@ -25,7 +25,7 @@ import {
 	IMAGE_PROMPT_MAX_CHARS,
 	findChainSource,
 	formatEditContext,
-	lineageTurns,
+	resolveImageSource,
 	traceEditLineage,
 	type EditLineage,
 	isMarkupFileName,
@@ -153,23 +153,31 @@ function markedOutputIndex(ctx: TextGenerationContext) {
 /** 起点那轮上传的原图（参考图）最多再带几张：每张 2K 图约 1.5k 输入图像 token */
 const CONTEXT_MAX_REFERENCES = 4;
 
-/** 把起点那轮上传的原图作为参考图再发一次（官方：第一张之外的图都是参考）。 */
-async function loadLineageReferences(
-	ctx: TextGenerationContext,
+/** 起点那轮上传的原图里，还要再发的那些（去掉已在这一轮里的，按上限截断）。 */
+function pickLineageReferences(
 	lineage: EditLineage<MessageFile>,
 	room: number,
 	exclude: Set<string>
 ) {
-	const refs: EditInput[] = [];
 	const seen = new Set(exclude);
+	const picked: MessageFile[] = [];
 	for (const file of lineage.root?.references ?? []) {
-		if (refs.length >= Math.min(room, CONTEXT_MAX_REFERENCES)) break;
+		if (picked.length >= Math.min(room, CONTEXT_MAX_REFERENCES)) break;
 		if (seen.has(file.value)) continue;
 		seen.add(file.value);
+		picked.push(file);
+	}
+	return picked;
+}
+
+/** 把起点那轮上传的原图作为参考图再发一次（官方：第一张之外的图都是参考）。 */
+async function loadLineageReferences(ctx: TextGenerationContext, files: MessageFile[]) {
+	const refs: Array<EditInput & { file: MessageFile }> = [];
+	for (const file of files) {
 		try {
 			const raw = await autoOrient(await loadFile(ctx, file));
 			const processed = await editInputProcessor({ ...raw, name: file.name });
-			refs.push({ buffer: processed.image, mime: processed.mime, name: file.name });
+			refs.push({ buffer: processed.image, mime: processed.mime, name: file.name, file });
 		} catch (err) {
 			// 参考图只是补充：读不出来就不带，不让这一轮失败
 			logger.warn({ err: errorDetail(err), name: file.name }, "[image] reference skipped");
@@ -479,33 +487,47 @@ export async function* generateImage(
 		mode = chain ? "chain" : inputs.length ? "edit" : "generate";
 
 		// 接着改之前生成的图（连续编辑，或标记了之前的输出）：把这张图的来历带上
-		const sourceIndex = chain ? chain.sourceIndex : markup ? markedOutputIndex(ctx) : -1;
+		const prior = ctx.messages.slice(0, Math.max(0, currentUserIndex(ctx)));
+		const sourceIndex = chain
+			? resolveImageSource(prior, chain.sourceIndex, chain.file.value)
+			: markup
+				? markedOutputIndex(ctx)
+				: -1;
 		let contextTurns = 0;
 		let references = 0;
 		if (sourceIndex >= 0) {
-			const prior = ctx.messages.slice(0, currentUserIndex(ctx));
 			const lineage = traceEditLineage(prior, sourceIndex) as EditLineage<MessageFile>;
 			const exclude = new Set(
 				[chain?.file, ...(lastUserMessage(ctx)?.files ?? [])]
 					.filter((f): f is MessageFile => Boolean(f))
 					.map((f) => f.value)
 			);
-			const refs = await loadLineageReferences(
-				ctx,
-				lineage,
-				EDIT_INPUT_MAX_IMAGES - inputs.length,
-				exclude
-			);
-			const withContext = formatEditContext(lineage, prompt, { references: refs.length });
-			if (withContext && withContext.length <= IMAGE_PROMPT_MAX_CHARS) {
-				requestPrompt = withContext;
-				contextTurns = lineageTurns(lineage);
-				references = refs.length;
-				for (const ref of refs) {
-					inputs.push({
-						...ref,
-						name: `input-${inputs.length}.${ref.mime.split("/")[1] ?? "png"}`,
-					});
+			const attachments = inputs.length - 1;
+			const picked = pickLineageReferences(lineage, EDIT_INPUT_MAX_IMAGES - inputs.length, exclude);
+			// 先确认放得下再去读图，放不下就照旧只发这一句
+			const rootRefs = lineage.root?.references ?? [];
+			// "最初的原图"的说法只给真正排在第一的那张；跳过了它（这一轮已附上或读不出来）就都按参考图说
+			const roles = (sent: MessageFile[]) => ({
+				attachments,
+				references: sent.length,
+				editedFirst: Boolean(lineage.root?.editedFirst) && sent[0] === rootRefs[0],
+				allReferences: sent.length === rootRefs.length,
+			});
+			const fits = formatEditContext(lineage, prompt, roles(picked));
+			if (fits && fits.prompt.length <= IMAGE_PROMPT_MAX_CHARS) {
+				const refs = await loadLineageReferences(ctx, picked);
+				const withContext = formatEditContext(lineage, prompt, roles(refs.map((ref) => ref.file)));
+				if (withContext) {
+					requestPrompt = withContext.prompt;
+					contextTurns = withContext.turns;
+					references = refs.length;
+					for (const ref of refs) {
+						inputs.push({
+							buffer: ref.buffer,
+							mime: ref.mime,
+							name: `input-${inputs.length}.${ref.mime.split("/")[1] ?? "png"}`,
+						});
+					}
 				}
 			}
 		}

@@ -19,7 +19,7 @@ import {
 	resolveImageDimensions,
 	traceEditLineage,
 	formatEditContext,
-	lineageTurns,
+	resolveImageSource,
 	MARKUP_NOTES_HEADER,
 	type LineageMessage,
 } from "./imageGeneration";
@@ -174,6 +174,10 @@ describe("multi-turn edit context", () => {
 	const out = (value: string) => img(value, "gpt-image-2.6-sunburst-2048x2048.png");
 	const notes = (...n: string[]) =>
 		`${MARKUP_NOTES_HEADER}\n${n.map((x, i) => `${i + 1}. ${x}`).join("\n")}`;
+	const marked = (value: string, tag: string) => [
+		img(value, `mk-${tag}-out.png`),
+		img(`layer-${tag}`, markupFileNameFor(tag)),
+	];
 
 	// a typical line: upload two images + request -> output -> markup on that output -> output
 	const conversation: LineageMessage[] = [
@@ -187,26 +191,19 @@ describe("multi-turn edit context", () => {
 		{
 			from: "user",
 			content: notes("no red cape", "thinner lines"),
-			files: [
-				img("o1", "mk-aaaaaaaaaaaa-out.png"),
-				img("layer1", markupFileNameFor("aaaaaaaaaaaa")),
-			],
+			files: marked("o1", "aaaaaaaaaaaa"),
 		},
 		{ from: "assistant", content: "已按标记编辑", files: [out("o2")] },
 	];
+	const firstMarkup =
+		"Notes for marks drawn on an earlier version:\n1. no red cape\n2. thinner lines";
 
 	it("walks back from the edited image to the original request and its uploads", () => {
 		const lineage = traceEditLineage(conversation, 4);
 		expect(lineage.root?.text).toContain("a flag in its left hand");
 		expect(lineage.root?.references.map((f) => f.value)).toEqual(["char", "ref"]);
-		expect(lineage.edits).toEqual([
-			{
-				index: 3,
-				text: "Notes for marks drawn on an earlier version:\n1. no red cape\n2. thinner lines",
-				markup: true,
-			},
-		]);
-		expect(lineageTurns(lineage)).toBe(2);
+		expect(lineage.root?.editedFirst).toBe(true);
+		expect(lineage.edits).toEqual([{ index: 3, text: firstMarkup, markup: true }]);
 	});
 
 	it("skips failed turns and follows plain follow-ups (no attachment) back through the chain", () => {
@@ -219,20 +216,44 @@ describe("multi-turn edit context", () => {
 		];
 		const lineage = traceEditLineage(msgs, 8);
 		expect(lineage.root?.index).toBe(1);
-		expect(lineage.edits.map((e) => e.text)).toEqual([
-			"Notes for marks drawn on an earlier version:\n1. no red cape\n2. thinner lines",
-			"眼睛更生动",
-		]);
+		expect(lineage.edits.map((e) => e.text)).toEqual([firstMarkup, "眼睛更生动"]);
 	});
 
-	it("starts a new line at a 'new image' turn or a fresh upload", () => {
+	it("keeps the line when a markup edit was blocked and the user then just types", () => {
+		// mark o2 -> moderation blocks (no image) -> "fix it": the chain source is the unanswered
+		// copy of o2 in the user message; it resolves back to the output and the walk goes on
+		const msgs: LineageMessage[] = [
+			...conversation,
+			{ from: "user", content: notes("被拦下的标记"), files: marked("o2", "bbbbbbbbbbbb") },
+			{ from: "assistant", content: "生图失败" },
+		];
+		const source = findChainSource(msgs);
+		expect(source?.index).toBe(5);
+		const resolved = resolveImageSource(msgs, source?.index ?? -1, source?.file.value);
+		expect(resolved).toBe(4);
+		const lineage = traceEditLineage(msgs, resolved);
+		expect(lineage.root?.index).toBe(1);
+		expect(lineage.edits.map((e) => e.text)).toEqual([firstMarkup]);
+
+		// and one turn later the walk passes through the blocked turn without its text
+		const later: LineageMessage[] = [
+			...msgs,
+			{ from: "user", content: "修一下" },
+			{ from: "assistant", content: "基于上一张图编辑", files: [out("o3")] },
+		];
+		const next = traceEditLineage(later, 8);
+		expect(next.root?.index).toBe(1);
+		expect(next.edits.map((e) => e.text)).toEqual([firstMarkup, "修一下"]);
+	});
+
+	it("starts a new line at a 'new image' turn, a fresh upload, or markup on an upload", () => {
 		const fresh: LineageMessage[] = [
 			...conversation,
 			{ from: "user", content: "画一只猫", imageFresh: true },
 			{ from: "assistant", content: "已生成", files: [out("cat")] },
 		];
 		expect(traceEditLineage(fresh, 6)).toEqual({
-			root: { index: 5, text: "画一只猫", references: [] },
+			root: { index: 5, text: "画一只猫", references: [], editedFirst: false },
 			edits: [],
 		});
 		const upload: LineageMessage[] = [
@@ -242,35 +263,89 @@ describe("multi-turn edit context", () => {
 		];
 		expect(traceEditLineage(upload, 6).edits).toEqual([]);
 		expect(traceEditLineage(upload, 6).root?.references.map((f) => f.value)).toEqual(["photo"]);
+		const markedUpload: LineageMessage[] = [
+			{
+				from: "user",
+				content: notes("换成蓝色"),
+				files: [img("hat"), ...marked("photo", "cccccccccccc")],
+			},
+			{ from: "assistant", content: "已按标记编辑", files: [out("blue")] },
+		];
+		const root = traceEditLineage(markedUpload, 1).root;
+		// the marked upload is the picture that was edited, so it comes first
+		expect(root?.references.map((f) => f.value)).toEqual(["photo", "hat"]);
+		expect(root?.editedFirst).toBe(true);
+		expect(root?.text).toBe("Notes for marks drawn on an earlier version:\n1. 换成蓝色");
 	});
 
 	it("keeps the root and the latest edits when the history is long", () => {
 		const lineage = {
-			root: { index: 1, text: "原始需求", references: [] },
+			root: { index: 1, text: "原始需求", references: [], editedFirst: false },
 			edits: Array.from({ length: 30 }, (_, i) => ({
 				index: i,
 				text: `第 ${i + 1} 次修改 ${"x".repeat(80)}`,
 				markup: false,
 			})),
 		};
-		const prompt = formatEditContext(lineage, "现在这句", { references: 0, maxChars: 1000 }) ?? "";
-		expect(prompt).toContain("Original request:\n原始需求");
-		expect(prompt).toMatch(/\(\d+ earlier edits omitted\)/);
-		expect(prompt).toContain("第 30 次修改");
-		expect(prompt).not.toContain("第 1 次修改");
-		expect(prompt).toContain("Now apply this edit to image 1:\n现在这句");
+		const ctx = formatEditContext(lineage, "现在这句", {
+			attachments: 0,
+			references: 0,
+			maxChars: 1000,
+		});
+		expect(ctx?.prompt).toContain("Original request:\n原始需求");
+		expect(ctx?.prompt).toMatch(/\(\d+ earlier edits omitted\)/);
+		expect(ctx?.prompt).toContain("第 30 次修改");
+		expect(ctx?.prompt).not.toContain("第 1 次修改");
+		expect(ctx?.prompt).toContain("Now apply this edit to image 1:\n现在这句");
+		// turns counts only what was actually carried
+		expect(ctx?.turns).toBeLessThan(31);
+		expect(ctx?.turns).toBe(1 + (ctx?.prompt.match(/第 \d+ 次修改/g)?.length ?? 0));
 	});
 
-	it("names the image roles and returns nothing when there is no history to add", () => {
-		const prompt = formatEditContext(traceEditLineage(conversation, 4), "眼睛更生动", {
-			references: 2,
+	it("shortens the latest edit instead of dropping it when it alone is over budget", () => {
+		const lineage = {
+			root: { index: 1, text: "原始需求", references: [], editedFirst: false },
+			edits: [
+				{ index: 2, text: "早一点的修改", markup: false },
+				{ index: 3, text: `最近的修改 ${"y".repeat(5000)}`, markup: false },
+			],
+		};
+		const ctx = formatEditContext(lineage, "现在这句", {
+			attachments: 0,
+			references: 0,
+			maxChars: 1000,
 		});
-		expect(prompt).toContain("Image 1 is the current version");
-		expect(prompt).toContain("Images 2-3 are reference images from the original request.");
-		expect(prompt?.indexOf("Original request")).toBeLessThan(
-			prompt?.indexOf("Edits already made") ?? 0
+		expect(ctx?.prompt).toContain("最近的修改");
+		expect(ctx?.prompt).toContain("(1 earlier edit omitted)");
+		expect(ctx?.prompt).toContain("2. 最近的修改");
+		expect(ctx?.turns).toBe(2);
+	});
+
+	it("names the image roles in the order they are sent", () => {
+		const lineage = traceEditLineage(conversation, 4);
+		const plain = formatEditContext(lineage, "眼睛更生动", {
+			attachments: 0,
+			references: 2,
+		})?.prompt;
+		expect(plain).toContain("Image 1 is the current version");
+		expect(plain).toContain("Image 2 is the original picture the first version was made from");
+		expect(plain).toContain("Image 3 is a reference image from the original request.");
+		expect(plain?.indexOf("Original request")).toBeLessThan(
+			plain?.indexOf("Edits already made") ?? 0
 		);
-		expect(prompt).toContain("Later instructions override earlier ones.");
-		expect(formatEditContext({ edits: [] }, "x", { references: 0 })).toBeUndefined();
+		expect(plain).toContain("Later instructions override earlier ones.");
+
+		// a markup turn that also attached a hat: image 2 is the hat, the old uploads come after it
+		const extras = formatEditContext(lineage, "加这顶帽子", {
+			attachments: 1,
+			references: 2,
+		})?.prompt;
+		expect(extras).toContain("Image 2 is attached with the new instruction.");
+		expect(extras).toContain("Image 3 is the original picture the first version was made from");
+		expect(extras).toContain("Image 4 is a reference image from the original request.");
+
+		expect(
+			formatEditContext({ edits: [] }, "x", { attachments: 0, references: 0 })
+		).toBeUndefined();
 	});
 });

@@ -240,8 +240,11 @@ export interface LineageMessage {
 }
 
 export interface EditLineage<F extends LineageFile = LineageFile> {
-	/** 链的起点：从零生成，或编辑用户上传的图。text 为空表示起点那轮没有可用的文字 */
-	root?: { index: number; text: string; references: F[] };
+	/**
+	 * 链的起点：从零生成，或编辑用户上传的图。text 为空表示起点那轮没有可用的文字。
+	 * references 是起点那轮上传的图；editedFirst 时第一张是被改成第一版的原图（不是普通参考）。
+	 */
+	root?: { index: number; text: string; references: F[]; editedFirst: boolean };
 	/** 之后每一轮的编辑要求，从早到晚；标记说明已改写成指向"更早的版本" */
 	edits: Array<{ index: number; text: string; markup: boolean }>;
 }
@@ -261,7 +264,22 @@ function lastAssistantWith(prior: readonly LineageMessage[], before: number, val
 }
 
 /**
- * `prior`：当前用户消息之前的消息（当前分支）；`sourceIndex`：被编辑的那张图所在的消息。
+ * 被编辑的图所在的消息。图来自一条用户消息时（那一轮失败了，例如标记编辑被审核拦下），
+ * 如果它其实是之前某张输出的副本（同一哈希），换成那条助手消息，链就能接着往回追。
+ */
+export function resolveImageSource(
+	prior: readonly LineageMessage[],
+	index: number,
+	value: string | undefined
+): number {
+	if (index < 0 || prior[index]?.from === "assistant" || !value) return index;
+	const output = lastAssistantWith(prior, index, value);
+	return output >= 0 ? output : index;
+}
+
+/**
+ * `prior`：当前用户消息之前的消息（当前分支）；`sourceIndex`：被编辑的那张图所在的消息
+ * （先经过 resolveImageSource）。
  */
 export function traceEditLineage<M extends LineageMessage>(
 	prior: readonly M[],
@@ -291,36 +309,41 @@ export function traceEditLineage<M extends LineageMessage>(
 				at = from;
 				continue;
 			}
-			// 标记的是用户上传的图：这一轮就是起点
-			root = { index: u, text: rewriteEarlierMarkupNotes(text), references: uploads };
+			// 标记的是用户上传的图：这一轮就是起点，被标记的那张排第一
+			root = {
+				index: u,
+				text: rewriteEarlierMarkupNotes(text),
+				references: target ? [target, ...uploads.filter((f) => f !== target)] : uploads,
+				editedFirst: Boolean(target),
+			};
 			break;
 		}
 		if (uploads.length) {
-			root = { index: u, text, references: uploads };
+			root = { index: u, text, references: uploads, editedFirst: true };
 			break;
 		}
 		if (turn.imageFresh) {
-			root = { index: u, text, references: [] };
+			root = { index: u, text, references: [], editedFirst: false };
 			break;
 		}
 		const source = findChainSource(prior.slice(0, u));
 		if (!source) {
-			root = { index: u, text, references: [] };
+			root = { index: u, text, references: [], editedFirst: false };
 			break;
 		}
 		edits.unshift({ index: u, text, markup: false });
-		if (prior[source.index].from !== "assistant") {
-			// 接着改的是一张没出过图的上传：那一轮失败了，它的文字不带（可能正是被拦下的那句）
+		const next = resolveImageSource(prior, source.index, (source.file as LineageFile).value);
+		if (prior[next].from !== "assistant") {
+			// 接着改的是一张从没出过图的上传：那一轮失败了，它的文字不带（可能正是被拦下的那句）
 			root = {
-				index: source.index,
+				index: next,
 				text: "",
-				references: (prior[source.index].files ?? []).filter(
-					(f) => isImageFile(f) && !isMarkupFileName(f.name)
-				) as F[],
+				references: [source.file as F],
+				editedFirst: true,
 			};
 			break;
 		}
-		at = source.index;
+		at = next;
 	}
 	return { root, edits: edits.filter((e) => e.text) };
 }
@@ -330,44 +353,91 @@ export const EDIT_CONTEXT_MAX_CHARS = 12_000;
 export const IMAGE_PROMPT_MAX_CHARS = 32_000;
 
 const indent = (text: string) => text.replace(/\s*\n\s*/g, "\n   ");
+const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}…` : text);
+
+function imageRange(first: number, count: number) {
+	return count === 1 ? `Image ${first} is` : `Images ${first}-${first + count - 1} are`;
+}
 
 /**
  * 把追到的上下文和这一轮的要求拼成一个 prompt。英文骨架（不猜用户语言，也不会被当成要画的字），
  * 用户原话照抄。历史太长时保留起点和最近的几轮，中间写明省略了几轮。
- * 没有可带的历史时返回 undefined，由调用方用原来的写法。
+ *
+ * 图的顺序：第 1 张是被编辑的图，接着是这一轮另外附的 `attachments` 张，最后是起点那轮上传的
+ * `references` 张。没有可带的历史时返回 undefined，由调用方用原来的写法。
  */
 export function formatEditContext(
 	lineage: EditLineage,
 	current: string,
-	opts: { references: number; maxChars?: number }
-): string | undefined {
+	opts: {
+		attachments: number;
+		references: number;
+		/** 实际发出的第一张参考图是不是被改成第一版的原图（默认按 lineage 判断） */
+		editedFirst?: boolean;
+		/** 起点那轮的上传是不是都带上了（默认按数量判断） */
+		allReferences?: boolean;
+		maxChars?: number;
+	}
+): { prompt: string; turns: number } | undefined {
 	const max = opts.maxChars ?? EDIT_CONTEXT_MAX_CHARS;
-	let rootText = lineage.root?.text ?? "";
+	const rootText = clip(lineage.root?.text ?? "", Math.floor(max / 2));
 	if (!rootText && lineage.edits.length === 0) return undefined;
-	if (rootText.length > max / 2) rootText = `${rootText.slice(0, max / 2)}…`;
 
 	let budget = max - rootText.length;
 	const kept: string[] = [];
 	let omitted = 0;
 	for (let i = lineage.edits.length - 1; i >= 0; i--) {
-		const line = indent(lineage.edits[i].text);
+		let line = indent(lineage.edits[i].text);
 		if (line.length + 8 > budget) {
-			omitted = i + 1;
+			if (kept.length === 0) {
+				// 最近一轮最重要：放不下就截短，不整条丢
+				line = clip(line, Math.max(200, budget - 8));
+				kept.unshift(line);
+				omitted = i;
+			} else {
+				omitted = i + 1;
+			}
 			break;
 		}
 		budget -= line.length + 8;
 		kept.unshift(line);
 	}
 
-	const parts = [
+	const roles = [
 		"This continues an image-editing conversation. Image 1 is the current version of the picture: " +
 			"the result of the requests below.",
 	];
-	if (opts.references === 1) {
-		parts[0] += " Image 2 is a reference image from the original request.";
-	} else if (opts.references > 1) {
-		parts[0] += ` Images 2-${opts.references + 1} are reference images from the original request.`;
+	let next = 2;
+	if (opts.attachments > 0) {
+		roles.push(`${imageRange(next, opts.attachments)} attached with the new instruction.`);
+		next += opts.attachments;
 	}
+	if (opts.references > 0) {
+		const editedFirst = opts.editedFirst ?? lineage.root?.editedFirst ?? false;
+		if (editedFirst) {
+			roles.push(
+				`Image ${next} is the original picture the first version was made from; ` +
+					"the requested changes have already been applied to image 1, so do not revert to it."
+			);
+			next += 1;
+		}
+		const rest = opts.references - (editedFirst ? 1 : 0);
+		if (rest > 0) {
+			roles.push(
+				rest === 1
+					? `Image ${next} is a reference image from the original request.`
+					: `${imageRange(next, rest)} reference images from the original request.`
+			);
+		}
+		const all = opts.allReferences ?? opts.references === (lineage.root?.references.length ?? 0);
+		if (all) {
+			roles.push(
+				"Where the original request mentions its images, it means these, in the same order."
+			);
+		}
+	}
+
+	const parts = [roles.join(" ")];
 	if (rootText) parts.push(`Original request:\n${rootText}`);
 	if (kept.length || omitted) {
 		const lines = kept.map((line, i) => `${omitted + i + 1}. ${line}`);
@@ -379,10 +449,5 @@ export function formatEditContext(
 		"Later instructions override earlier ones. Keep every earlier requirement the new instruction " +
 			"does not change, and keep everything else unchanged (subject, composition, style, colors)."
 	);
-	return parts.join("\n\n");
-}
-
-/** 上下文里实际带上的轮数（给回复说明和日志用）。 */
-export function lineageTurns(lineage: EditLineage): number {
-	return (lineage.root?.text ? 1 : 0) + lineage.edits.length;
+	return { prompt: parts.join("\n\n"), turns: (rootText ? 1 : 0) + kept.length };
 }

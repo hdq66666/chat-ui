@@ -494,6 +494,179 @@ describe("generateImage", () => {
 			expect(form.get("prompt")).toBe(`${CHAIN_EDIT_PREAMBLE}\n\n提高分辨率`);
 		});
 
+		async function serveImages(sizes: Record<string, number>) {
+			const files: Record<string, Buffer> = {};
+			for (const [sha, w] of Object.entries(sizes)) files[sha] = await png(w, w);
+			files.layer = await sharp({
+				create: {
+					width: 1024,
+					height: 1024,
+					channels: 4,
+					background: { r: 0, g: 0, b: 0, alpha: 0 },
+				},
+			})
+				.png()
+				.toBuffer();
+			mocks.downloadFile.mockImplementation(async (sha: string) => ({
+				type: "base64",
+				value: files[sha].toString("base64"),
+				mime: "image/png",
+				name: sha,
+			}));
+			mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
+		}
+		const hf = (value: string, name: string) => ({ type: "hash", value, mime: "image/png", name });
+		async function widths(form: FormData) {
+			return Promise.all(
+				form
+					.getAll("image[]")
+					.map(
+						async (part) =>
+							(await sharp(Buffer.from(await (part as Blob).arrayBuffer())).metadata()).width
+					)
+			);
+		}
+
+		it("keeps the history when a blocked markup edit is followed by a plain message", async () => {
+			await serveImages({ char: 512, o1: 1024 });
+			await collect({
+				model: { id: "gpt-image-2.6-sunburst", imageGeneration: true },
+				conv: { _id: new ObjectId() },
+				messages: [
+					{
+						from: "user",
+						id: "u0",
+						content: "chibi avatar, white background",
+						files: [hf("char", "char.png")],
+					},
+					{ from: "assistant", id: "a0", content: "已编辑", files: [hf("o1", "out.png")] },
+					{
+						from: "user",
+						id: "u1",
+						content: "Numbered marks on the markup layer:\n1. 被拦下的标记",
+						files: [
+							hf("o1", markupTargetNameFor("eeeeeeeeeeee", "out.png")),
+							hf("layer", markupFileNameFor("eeeeeeeeeeee")),
+						],
+					},
+					{ from: "assistant", id: "a1", content: "生图失败" },
+					{ from: "user", id: "u2", content: "眼睛更生动" },
+				],
+				abortController: new AbortController(),
+				imageSize: "1K",
+				imageAspect: "1:1",
+			} as unknown as TextGenerationContext);
+			const form = mocks.fetch.mock.calls[0][1].body as FormData;
+			// the copy of o1 is edited first, the original upload follows as the source picture
+			expect(await widths(form)).toEqual([1024, 512]);
+			const prompt = String(form.get("prompt"));
+			expect(prompt).toContain("Original request:\nchibi avatar, white background");
+			expect(prompt).not.toContain("被拦下的标记");
+			expect(prompt).toContain("Now apply this edit to image 1:\n眼睛更生动");
+		});
+
+		it("does not call a plain reference 'the original picture' when the original was re-attached", async () => {
+			await serveImages({ char: 512, ref: 256, o1: 1024 });
+			await collect({
+				model: { id: "gpt-image-2.6-sunburst", imageGeneration: true },
+				conv: { _id: new ObjectId() },
+				messages: [
+					{
+						from: "user",
+						id: "u0",
+						content: "像第二张图那样笑",
+						files: [hf("char", "char.png"), hf("ref", "ref.png")],
+					},
+					{ from: "assistant", id: "a0", content: "已编辑", files: [hf("o1", "out.png")] },
+					{
+						from: "user",
+						id: "u1",
+						content: "Numbered marks on the markup layer:\n1. 鼻子按原图",
+						files: [
+							hf("char", "char.png"),
+							hf("o1", markupTargetNameFor("ffffffffffff", "out.png")),
+							hf("layer", markupFileNameFor("ffffffffffff")),
+						],
+					},
+				],
+				abortController: new AbortController(),
+				imageSize: "1K",
+				imageAspect: "1:1",
+			} as unknown as TextGenerationContext);
+			const form = mocks.fetch.mock.calls[0][1].body as FormData;
+			expect(await widths(form)).toEqual([1024, 512, 256]); // marked output, re-attached original, ref
+			const prompt = String(form.get("prompt"));
+			expect(prompt).toContain("Image 2 is attached with the new instruction.");
+			expect(prompt).toContain("Image 3 is a reference image from the original request.");
+			expect(prompt).not.toContain("original picture the first version was made from");
+			expect(prompt).not.toContain("in the same order");
+		});
+
+		it("numbers a new attachment before the original uploads in a markup edit", async () => {
+			const files: Record<string, Buffer> = {
+				char: await png(512, 512),
+				o1: await png(1024, 1024),
+				hat: await png(300, 300),
+				layer: await sharp({
+					create: {
+						width: 1024,
+						height: 1024,
+						channels: 4,
+						background: { r: 0, g: 0, b: 0, alpha: 0 },
+					},
+				})
+					.png()
+					.toBuffer(),
+			};
+			mocks.downloadFile.mockImplementation(async (sha: string) => ({
+				type: "base64",
+				value: files[sha].toString("base64"),
+				mime: "image/png",
+				name: sha,
+			}));
+			mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
+			const h = (value: string, name: string) => ({ type: "hash", value, mime: "image/png", name });
+			await collect({
+				model: { id: "gpt-image-2.6-sunburst", imageGeneration: true },
+				conv: { _id: new ObjectId() },
+				messages: [
+					{
+						from: "user",
+						id: "u0",
+						content: "chibi avatar, white background",
+						files: [h("char", "char.png")],
+					},
+					{ from: "assistant", id: "a0", content: "已编辑", files: [h("o1", "out.png")] },
+					{
+						from: "user",
+						id: "u1",
+						content: "Numbered marks on the markup layer:\n1. 戴上附图的帽子",
+						files: [
+							h("hat", "hat.png"),
+							h("o1", markupTargetNameFor("dddddddddddd", "out.png")),
+							h("layer", markupFileNameFor("dddddddddddd")),
+						],
+					},
+				],
+				abortController: new AbortController(),
+				imageSize: "1K",
+				imageAspect: "1:1",
+			} as unknown as TextGenerationContext);
+			const form = mocks.fetch.mock.calls[0][1].body as FormData;
+			const sizes = await Promise.all(
+				form
+					.getAll("image[]")
+					.map(
+						async (part) =>
+							(await sharp(Buffer.from(await (part as Blob).arrayBuffer())).metadata()).width
+					)
+			);
+			expect(sizes).toEqual([1024, 300, 512]); // marked output, the new hat, the original upload
+			const prompt = String(form.get("prompt"));
+			expect(prompt).toContain("Image 2 is attached with the new instruction.");
+			expect(prompt).toContain("Image 3 is the original picture the first version was made from");
+		});
+
 		it("carries the whole history and the original uploads when marking an earlier output", async () => {
 			const files: Record<string, Buffer> = {
 				char: await png(512, 512),
@@ -549,9 +722,17 @@ describe("generateImage", () => {
 			const form = mocks.fetch.mock.calls[0][1].body as FormData;
 			const images = form.getAll("image[]");
 			expect(images).toHaveLength(3); // the marked output first, then the two original uploads
+			const sizes = await Promise.all(
+				images.map(
+					async (part) =>
+						(await sharp(Buffer.from(await (part as Blob).arrayBuffer())).metadata()).width
+				)
+			);
+			expect(sizes).toEqual([1024, 512, 256]);
 			expect(form.get("markup")).not.toBeNull();
 			const prompt = String(form.get("prompt"));
-			expect(prompt).toContain("Images 2-3 are reference images from the original request.");
+			expect(prompt).toContain("Image 2 is the original picture the first version was made from");
+			expect(prompt).toContain("Image 3 is a reference image from the original request.");
 			expect(prompt).toContain("Original request:\na flag in the left hand, white background");
 			expect(prompt).toContain(
 				"Now apply this edit to image 1:\nNumbered marks on the markup layer:\n1. 描边太粗"
