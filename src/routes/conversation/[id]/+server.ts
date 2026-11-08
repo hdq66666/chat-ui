@@ -174,6 +174,7 @@ export async function POST({ request, locals, params, getClientAddress }) {
 		selectedMcpServerNames,
 		selectedMcpServers,
 		timezone,
+		imageFresh,
 	} = z
 		.object({
 			id: z.string().uuid().refine(isMessageId).optional(), // parent message id to append to for a normal message, or the message id for a retry/continue
@@ -204,6 +205,7 @@ export async function POST({ request, locals, params, getClientAddress }) {
 				)
 				.default([]),
 			timezone: z.optional(z.string()),
+			imageFresh: z.optional(z.boolean()),
 			files: z.optional(
 				z.array(
 					z.object({
@@ -328,6 +330,7 @@ export async function POST({ request, locals, params, getClientAddress }) {
 					from: "user",
 					content: newPrompt,
 					files: uploadedFiles,
+					...(imageFresh ? { imageFresh: true } : {}),
 					createdAt: new Date(),
 					updatedAt: new Date(),
 				},
@@ -364,6 +367,7 @@ export async function POST({ request, locals, params, getClientAddress }) {
 				from: "user",
 				content: newPrompt ?? "",
 				files: uploadedFiles,
+				...(imageFresh ? { imageFresh: true } : {}),
 				createdAt: new Date(),
 				updatedAt: new Date(),
 			},

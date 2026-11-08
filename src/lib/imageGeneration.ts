@@ -146,3 +146,71 @@ export function formatMarkupNotes(notes: readonly string[]): string | undefined 
 		...cleaned.map((note, i) => `${i + 1}. ${note.replace(/\s*\n\s*/g, "\n   ")}`),
 	].join("\n");
 }
+
+/**
+ * 连续编辑：当前消息没附图时，接着改对话里最近的一张图（像 ChatGPT 那样）。
+ *
+ * 只看当前分支（树上从根到当前消息的路径），规则：
+ * 1. 上一条用户消息附了图、而它之后没有助手出图（那一轮失败/中断/给的是聊天模型）
+ *    —— 用那张附图，这是用户最近明确给出的图；
+ * 2. 否则用最近一条带图的助手回复里的图。只有生图模型会给助手消息挂图，
+ *    出错和中断的回复没有图，自然被跳过。
+ * 标记图层（chatui-markup-*）永远不沿用：它只对同一条消息里的那张图有意义。
+ */
+export interface ChainCandidateMessage {
+	from: string;
+	files?: Array<{ name: string; mime: string }>;
+}
+
+function firstEditableImage<F extends { name: string; mime: string }>(files: F[] | undefined) {
+	return files?.find((f) => f.mime?.startsWith("image/") && !isMarkupFileName(f.name));
+}
+
+/** `prior`：当前用户消息之前的消息（不含当前消息）。 */
+export function findChainSource<M extends ChainCandidateMessage>(
+	prior: readonly M[]
+): { index: number; file: NonNullable<M["files"]>[number] } | undefined {
+	let lastUser = -1;
+	for (let i = prior.length - 1; i >= 0; i--) {
+		if (prior[i].from === "user") {
+			lastUser = i;
+			break;
+		}
+	}
+	if (lastUser >= 0) {
+		const upload = firstEditableImage(prior[lastUser].files);
+		const answered = prior
+			.slice(lastUser + 1)
+			.some((m) => m.from === "assistant" && firstEditableImage(m.files));
+		if (upload && !answered) return { index: lastUser, file: upload };
+	}
+	for (let i = prior.length - 1; i >= 0; i--) {
+		if (prior[i].from !== "assistant") continue;
+		const file = firstEditableImage(prior[i].files);
+		if (file) return { index: i, file };
+	}
+	return undefined;
+}
+
+/** 与 width/height 最接近的档位比例（按对数距离），沿用上一张图的比例时用。 */
+export function nearestImageAspect(width: number, height: number): ImageAspect {
+	const target = Math.log(width / height);
+	let best: ImageAspect = DEFAULT_IMAGE_ASPECT;
+	let bestDistance = Infinity;
+	for (const aspect of IMAGE_ASPECTS) {
+		const [a, b] = aspect.split(":").map(Number);
+		const distance = Math.abs(Math.log(a / b) - target);
+		if (distance < bestDistance) {
+			best = aspect;
+			bestDistance = distance;
+		}
+	}
+	return best;
+}
+
+/**
+ * 沿用上一张图时加在用户文字前的说明。英文，和 formatMarkupNotes 一致：
+ * 不猜用户语言，也不会被当成要画进图里的字。
+ */
+export const CHAIN_EDIT_PREAMBLE =
+	"Edit the provided image as instructed below. Keep everything not mentioned unchanged (subject, composition, style, colors).";

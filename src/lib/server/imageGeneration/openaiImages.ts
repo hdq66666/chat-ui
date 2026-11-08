@@ -21,7 +21,10 @@ import {
 	IMAGE_STABLE_MAX_PIXELS,
 	imageSizeViolation,
 	isImageComplexity,
+	CHAIN_EDIT_PREAMBLE,
+	findChainSource,
 	isMarkupFileName,
+	nearestImageAspect,
 	markupTagOf,
 	markupTagOfTarget,
 	resolveImageDimensions,
@@ -67,14 +70,21 @@ interface ImagesApiResponse {
 	size?: string;
 	quality?: string;
 	usage?: unknown;
-	error?: { message?: string; code?: string; type?: string };
+	error?: {
+		message?: string;
+		code?: string;
+		type?: string;
+		moderation_details?: { moderation_stage?: string; categories?: unknown };
+	};
 }
 
 class ImageApiError extends Error {
 	constructor(
 		message: string,
 		readonly status: number,
-		readonly code?: string
+		readonly code?: string,
+		/** moderation_details.moderation_stage: input | output | unknown */
+		readonly stage?: string
 	) {
 		super(message);
 		this.name = "ImageApiError";
@@ -84,6 +94,32 @@ class ImageApiError extends Error {
 /** 用户在菜单里选的优先，其次 OPENAI_IMAGE_COMPLEXITY；都没有就不发，用 API 默认（high）。 */
 function effectiveComplexity(ctx: TextGenerationContext): string | undefined {
 	return isImageComplexity(ctx.imageComplexity) ? ctx.imageComplexity : imageComplexity();
+}
+
+type ImageMode = "generate" | "edit" | "chain";
+
+/**
+ * 当前消息没附图、也没要求从零生成时，取对话里上一张图作为被编辑的图
+ * （规则见 $lib/imageGeneration 的 findChainSource）。
+ */
+async function loadChainInput(ctx: TextGenerationContext) {
+	let current = ctx.messages.length - 1;
+	while (current >= 0 && ctx.messages[current].from !== "user") current--;
+	if (current < 0 || ctx.messages[current].imageFresh) return undefined;
+	const source = findChainSource(ctx.messages.slice(0, current));
+	if (!source) return undefined;
+	const raw = await autoOrient(await loadFile(ctx, source.file));
+	const processed = await editInputProcessor({ ...raw, name: source.file.name });
+	const { width, height } = await sharp(processed.image).metadata();
+	if (!width || !height) throw new Error("读不出上一张图的尺寸");
+	const ext = processed.mime.split("/")[1] ?? "png";
+	return {
+		input: { buffer: processed.image, mime: processed.mime, name: `input-0.${ext}` },
+		width,
+		height,
+		messageId: ctx.messages[source.index].id,
+		file: source.file,
+	};
 }
 
 function lastUserMessage(ctx: TextGenerationContext) {
@@ -238,10 +274,7 @@ async function callImagesApi(
 		form.append("size", params.size);
 		form.append("n", "1");
 		form.append("output_format", fmt);
-		// moderation 只确认 generations 支持，edits 不发，免得被拒
-		for (const [k, v] of Object.entries(optional)) {
-			if (k !== "moderation") form.append(k, v);
-		}
+		for (const [k, v] of Object.entries(optional)) form.append(k, v);
 		for (const input of params.inputs) {
 			form.append(
 				"image[]",
@@ -285,8 +318,18 @@ async function callImagesApi(
 		// 非 JSON（网关错误页等），下面按状态码报错
 	}
 	if (!res.ok) {
+		// 整个 error 对象记进日志（不含请求内容和 key），方便查审核拦截的细节
+		logger.warn(
+			{ status: res.status, error: json.error ?? text.slice(0, 500) },
+			"[image] api error"
+		);
 		const message = json.error?.message || `HTTP ${res.status} ${text.slice(0, 200)}`;
-		throw new ImageApiError(message, res.status, json.error?.code);
+		throw new ImageApiError(
+			message,
+			res.status,
+			json.error?.code,
+			json.error?.moderation_details?.moderation_stage
+		);
 	}
 	return json;
 }
@@ -307,9 +350,29 @@ function errorDetail(err: unknown): string {
 	return err.message;
 }
 
-function describeError(err: unknown): string {
+function isModerationBlock(err: ImageApiError) {
+	return err.code === "moderation_blocked" || /safety system/i.test(err.message);
+}
+
+/** 安全审核拦截：说明拦在哪一步、能怎么办；从不自动重试或改写提示词。 */
+function describeModerationBlock(err: ImageApiError, mode: ImageMode): string {
+	const lines = ["请求被 OpenAI 安全审核拦截。"];
+	if (err.stage === "output") lines.push("拦截发生在生成结果上，结果有随机性，可以直接重试一次。");
+	else if (err.stage === "input")
+		lines.push("拦截发生在输入上，可以改一下文字描述或换一张图再试。");
+	else lines.push("可以调整描述后再试。");
+	if (mode === "generate") {
+		lines.push(
+			"从零生成时提示词太短更容易被误判，描述得具体一些会好些；要改已有的图，请附上图片或用图片上的铅笔按钮。"
+		);
+	}
+	lines.push("", `OpenAI 原文：${err.message}`);
+	return lines.join("\n");
+}
+
+function describeError(err: unknown, mode: ImageMode = "generate"): string {
 	if (err instanceof ImageApiError) {
-		if (err.code === "moderation_blocked") return `请求被 OpenAI 安全审核拦截：${err.message}`;
+		if (isModerationBlock(err)) return describeModerationBlock(err, mode);
 		if (err.status === 401) return "OpenAI 拒绝了 API key（401），请检查 OPENAI_IMAGE_API_KEY。";
 		if (err.status === 429) return `OpenAI 限流或额度不足（429）：${err.message}`;
 		return `生图失败（${err.status}）：${err.message}`;
@@ -328,7 +391,7 @@ function isAbort(ctx: TextGenerationContext, err: unknown) {
 export async function* generateImage(
 	ctx: TextGenerationContext
 ): AsyncGenerator<MessageUpdate, undefined, undefined> {
-	const dims = resolveImageDimensions(ctx.imageSize, ctx.imageAspect);
+	let dims = resolveImageDimensions(ctx.imageSize, ctx.imageAspect);
 	const violation = imageSizeViolation(dims.width, dims.height);
 	if (violation) {
 		yield finalAnswer(`尺寸 ${dims.size} 不符合 OpenAI 规则：${violation}`);
@@ -336,6 +399,7 @@ export async function* generateImage(
 	}
 
 	const startedAt = Date.now();
+	let mode: ImageMode = "generate";
 	try {
 		const { prompt, ignored } = await buildPrompt(ctx);
 		if (!prompt) {
@@ -347,8 +411,17 @@ export async function* generateImage(
 			yield finalAnswer("找不到标记图层对应的图片，请把被标记的图片和标记一起发送。");
 			return;
 		}
+		// 没附图：接着改上一张图（除非用户这条选了"从零生成"）。比例沿用那张图，
+		// 档位用用户设置的 —— 所以"提高分辨率"配 2K 就会按 2K 重新渲染
+		const chain = inputs.length || markup ? undefined : await loadChainInput(ctx);
+		let requestPrompt = prompt;
+		if (chain) {
+			inputs.push(chain.input);
+			dims = resolveImageDimensions(ctx.imageSize, nearestImageAspect(chain.width, chain.height));
+			requestPrompt = `${CHAIN_EDIT_PREAMBLE}\n\n${prompt}`;
+		}
+		mode = chain ? "chain" : inputs.length ? "edit" : "generate";
 		const complexity = effectiveComplexity(ctx);
-		const mode = inputs.length ? "edit" : "generate";
 		logger.info(
 			{
 				model: ctx.model.id,
@@ -357,11 +430,25 @@ export async function* generateImage(
 				complexity,
 				inputs: inputs.length,
 				markup: Boolean(markup),
+				...(chain
+					? {
+							chainSource: {
+								messageId: chain.messageId,
+								name: chain.file.name,
+								sha: chain.file.type === "hash" ? chain.file.value : undefined,
+							},
+						}
+					: {}),
 			},
 			"[image] request"
 		);
 
-		const res = await callImagesApi(ctx, { prompt, size: dims.size, inputs, markup });
+		const res = await callImagesApi(ctx, {
+			prompt: requestPrompt,
+			size: dims.size,
+			inputs,
+			markup,
+		});
 		const b64 = res.data?.[0]?.b64_json;
 		if (!b64) throw new Error("响应里没有 b64_json");
 
@@ -382,10 +469,22 @@ export async function* generateImage(
 			{ model: ctx.model.id, mode, size: res.size || dims.size, seconds, usage: res.usage },
 			"[image] done"
 		);
+		const outSize = res.size || dims.size;
+		const verb =
+			mode === "chain"
+				? `基于上一张图编辑（${chain?.width}x${chain?.height} → ${outSize}）`
+				: mode === "edit"
+					? markup
+						? "已按标记编辑"
+						: "已编辑"
+					: "已生成";
 		const notes = [
-			`${mode === "edit" ? (markup ? "已按标记编辑" : "已编辑") : "已生成"}：${dims.tier} ${dims.aspect}（${res.size || dims.size}）` +
+			`${verb}：${dims.tier} ${dims.aspect}（${outSize}）` +
 				`${complexity ? `，复杂度 ${complexity}` : ""}，${seconds} 秒。`,
 		];
+		if (chain && dims.aspect !== resolveImageDimensions(ctx.imageSize, ctx.imageAspect).aspect) {
+			notes.push(`比例沿用上一张图（${dims.aspect}），不按设置裁切。`);
+		}
 		if (dims.width * dims.height > IMAGE_STABLE_MAX_PIXELS) {
 			notes.push("超过 2560×1440 的尺寸 OpenAI 标为实验性。");
 		}
@@ -396,8 +495,8 @@ export async function* generateImage(
 	} catch (err) {
 		// 用户停止：conversation 路由会自己补一条 interrupted 的最终回答
 		if (isAbort(ctx, err)) return;
-		logger.error({ err: errorDetail(err), model: ctx.model.id }, "[image] failed");
-		yield finalAnswer(describeError(err));
+		logger.error({ err: errorDetail(err), model: ctx.model.id, mode }, "[image] failed");
+		yield finalAnswer(describeError(err, mode));
 	}
 }
 

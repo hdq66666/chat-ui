@@ -16,3 +16,10 @@ export const markupRequest = writable<MarkupRequest | undefined>(undefined);
 
 /** True while the current model is an image model, i.e. while a markup edit can be sent */
 export const markupEditingAvailable = writable(false);
+
+/**
+ * One-shot: the next message to an image model generates from scratch instead
+ * of editing the previous image. Set by the toggle in ChatWindow, read and
+ * cleared by the conversation page when it sends.
+ */
+export const imageFreshNext = writable(false);

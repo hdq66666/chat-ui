@@ -6,7 +6,9 @@ import {
 	IMAGE_MAX_PIXELS,
 	IMAGE_SIZE_TIERS,
 	imageSizeViolation,
+	findChainSource,
 	formatMarkupNotes,
+	nearestImageAspect,
 	isImageComplexity,
 	isMarkupFileName,
 	markupFileNameFor,
@@ -95,6 +97,64 @@ describe("image size tiers", () => {
 			"Numbered marks on the markup layer:\n1. make it blue\n2. remove\n   this"
 		);
 		expect(formatMarkupNotes([" "])).toBeUndefined();
+	});
+
+	describe("findChainSource", () => {
+		const img = (name: string) => ({ name, mime: "image/png" });
+		it("picks the latest assistant image", () => {
+			const prior = [
+				{ from: "system" },
+				{ from: "user", files: [img("upload.jpg")] },
+				{ from: "assistant", files: [img("out-1.png")] },
+				{ from: "user" },
+				{ from: "assistant", files: [img("out-2.png")] },
+			];
+			expect(findChainSource(prior)).toEqual({ index: 4, file: img("out-2.png") });
+		});
+		it("skips replies without an image (errors, aborts)", () => {
+			const prior = [
+				{ from: "user" },
+				{ from: "assistant", files: [img("out-1.png")] },
+				{ from: "user" },
+				{ from: "assistant" },
+			];
+			expect(findChainSource(prior)?.file.name).toBe("out-1.png");
+		});
+		it("prefers the last upload when its turn produced no image", () => {
+			const prior = [
+				{ from: "user" },
+				{ from: "assistant", files: [img("out-1.png")] },
+				{ from: "user", files: [img("new-upload.jpg")] },
+				{ from: "assistant" },
+			];
+			expect(findChainSource(prior)?.file.name).toBe("new-upload.jpg");
+		});
+		it("does not reach back to an older upload shown to a chat model", () => {
+			const prior = [
+				{ from: "user", files: [img("screenshot.png")] },
+				{ from: "assistant" },
+				{ from: "user" },
+				{ from: "assistant" },
+			];
+			expect(findChainSource(prior)).toBeUndefined();
+		});
+		it("never carries a markup layer and ignores non-images", () => {
+			const prior = [
+				{
+					from: "user",
+					files: [img("chatui-markup-aaaaaaaaaaaa.png"), { name: "a.txt", mime: "text/plain" }],
+				},
+				{ from: "assistant" },
+			];
+			expect(findChainSource(prior)).toBeUndefined();
+		});
+	});
+
+	it("snaps to the nearest aspect", () => {
+		expect(nearestImageAspect(1536, 864)).toBe("16:9");
+		expect(nearestImageAspect(1024, 1024)).toBe("1:1");
+		expect(nearestImageAspect(600, 400)).toBe("3:2");
+		expect(nearestImageAspect(1170, 2532)).toBe("9:16");
 	});
 
 	it("falls back to 1K 1:1 for missing or unknown values", () => {

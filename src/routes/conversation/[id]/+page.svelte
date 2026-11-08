@@ -25,6 +25,7 @@
 	import { v4 } from "uuid";
 	import { useSettingsStore } from "$lib/stores/settings.js";
 	import { enabledServers, mcpServersLoaded } from "$lib/stores/mcpServers";
+	import { imageFreshNext } from "$lib/stores/markupRequest";
 	import { get } from "svelte/store";
 	import { browser } from "$app/environment";
 	import { reattachStream } from "$lib/utils/reattachStream";
@@ -314,6 +315,8 @@
 					})),
 					timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
 					streamingMode,
+					// One-shot "new image" toggle; a retry reuses what the user message stored
+					imageFresh: prompt !== undefined && get(imageFreshNext),
 				},
 				messageUpdatesAbortController.signal
 			).catch((err) => {
@@ -322,6 +325,7 @@
 					error.set(err.message);
 				}
 			});
+			if (prompt !== undefined) imageFreshNext.set(false);
 			if (messageUpdatesIterator === undefined) return;
 
 			// Clear only attachments this send actually consumed: a direct fix

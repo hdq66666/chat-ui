@@ -37,6 +37,8 @@ type MessageUpdateRequestOptions = {
 	// User's IANA timezone (e.g. "America/New_York")
 	timezone?: string;
 	streamingMode?: StreamingMode;
+	/** Image models: generate from scratch instead of editing the previous image */
+	imageFresh?: boolean;
 };
 
 type ChunkDetector = (buffer: string) => string | null;
@@ -74,6 +76,7 @@ export async function fetchMessageUpdates(
 		selectedMcpServerNames: opts.selectedMcpServerNames,
 		selectedMcpServers: opts.selectedMcpServers,
 		timezone: opts.timezone,
+		...(opts.imageFresh ? { imageFresh: true } : {}),
 	});
 
 	opts.files?.forEach((file) => {

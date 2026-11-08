@@ -39,8 +39,9 @@
 	import ImageSizeChip from "./ImageSizeChip.svelte";
 	import ScreenshotAnnotationModal from "./ScreenshotAnnotationModal.svelte";
 	import { pngDataUrlToFile } from "$lib/utils/artifactCapture";
-	import { markupEditingAvailable, markupRequest } from "$lib/stores/markupRequest";
+	import { imageFreshNext, markupEditingAvailable, markupRequest } from "$lib/stores/markupRequest";
 	import {
+		findChainSource,
 		formatMarkupNotes,
 		isMarkupFileName,
 		markupFileNameFor,
@@ -381,6 +382,18 @@
 		if (current.some((f) => isMarkupFileName(f.name))) {
 			files = current.filter((f) => !isMarkupFileName(f.name));
 		}
+	});
+
+	// Image models edit the last image in the conversation when nothing is
+	// attached; the toggle lets one message generate from scratch instead.
+	let chainAvailable = $derived(
+		Boolean(currentModel.imageGeneration) &&
+			!shared &&
+			!files.some((f) => resolveFileMime(f.name, f.type).startsWith("image/")) &&
+			Boolean(findChainSource(messages))
+	);
+	$effect(() => {
+		if (!chainAvailable) imageFreshNext.set(false);
 	});
 
 	async function fetchAsFile(src: string, name: string): Promise<File | undefined> {
@@ -1296,7 +1309,20 @@
 						>
 					{/if}
 					{#if currentModel.imageGeneration}
-						<div class="ml-auto">
+						<div class="ml-auto flex items-center gap-3">
+							{#if chainAvailable}
+								<button
+									type="button"
+									class="inline-flex items-center gap-1 hover:underline"
+									title={$imageFreshNext
+										? "This message generates a new image. Click to edit the last image instead."
+										: "This message edits the last image in the conversation. Click to generate a new image instead."}
+									aria-pressed={!$imageFreshNext}
+									onclick={() => imageFreshNext.update((v) => !v)}
+								>
+									{$imageFreshNext ? "New image" : "Edits last image"}
+								</button>
+							{/if}
 							<ImageSizeChip modelId={currentModel.id} />
 						</div>
 					{:else if $settings.reasoningOverrides?.[currentModel.id] ?? currentModel.supportsReasoning}

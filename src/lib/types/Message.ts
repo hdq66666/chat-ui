@@ -31,6 +31,12 @@ export type Message = Partial<Timestamps> & {
 	 **/
 	files?: MessageFile[];
 	interrupted?: boolean;
+	/**
+	 * Image models only, on user messages: generate from scratch instead of
+	 * continuing from the previous image in the conversation. Stored on the
+	 * message so a retry behaves like the original turn.
+	 */
+	imageFresh?: boolean;
 
 	// Router metadata when using llm-router
 	routerMetadata?: {

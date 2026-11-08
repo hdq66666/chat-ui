@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ObjectId } from "mongodb";
 import { MessageUpdateType, type MessageUpdate } from "$lib/types/MessageUpdate";
-import { markupFileNameFor, markupTargetNameFor } from "$lib/imageGeneration";
+import { CHAIN_EDIT_PREAMBLE, markupFileNameFor, markupTargetNameFor } from "$lib/imageGeneration";
 import sharp from "sharp";
 import type { TextGenerationContext } from "$lib/server/textGeneration/types";
 
@@ -217,7 +217,7 @@ describe("generateImage", () => {
 		);
 	});
 
-	it("does not send moderation on edits", async () => {
+	it("sends moderation on edits too (documented for /images/edits)", async () => {
 		mocks.config.OPENAI_IMAGE_MODERATION = "low";
 		mocks.downloadFile.mockResolvedValue({
 			type: "base64",
@@ -229,7 +229,7 @@ describe("generateImage", () => {
 		await collect(
 			ctx({ files: [{ type: "hash", value: "sha-a", mime: "image/png", name: "a.png" }] })
 		);
-		expect((mocks.fetch.mock.calls[0][1].body as FormData).get("moderation")).toBeNull();
+		expect((mocks.fetch.mock.calls[0][1].body as FormData).get("moderation")).toBe("low");
 	});
 
 	it("shows the cause of a network failure instead of just 'fetch failed'", async () => {
@@ -408,6 +408,100 @@ describe("generateImage", () => {
 			expect(mocks.fetch).not.toHaveBeenCalled();
 			expect((updates[0] as { text: string }).text).toContain("找不到标记图层");
 		});
+	});
+
+	describe("continuing from the previous image", () => {
+		async function png(width: number, height: number) {
+			return sharp({
+				create: { width, height, channels: 3, background: { r: 1, g: 2, b: 3 } },
+			})
+				.png()
+				.toBuffer();
+		}
+		function chainCtx(opts: { fresh?: boolean; prevReply?: boolean } = {}) {
+			return {
+				model: { id: "gpt-image-2.6-flare", imageGeneration: true },
+				conv: { _id: new ObjectId() },
+				messages: [
+					{ from: "system", id: "s", content: "" },
+					{ from: "user", id: "u0", content: "draw a room" },
+					{
+						from: "assistant",
+						id: "a0",
+						content: "已生成",
+						files: [{ type: "hash", value: "sha-out", mime: "image/png", name: "out.png" }],
+					},
+					...(opts.prevReply === false
+						? []
+						: [
+								{ from: "user", id: "u1", content: "something" },
+								{ from: "assistant", id: "a1", content: "生图失败：…" },
+							]),
+					{
+						from: "user",
+						id: "u2",
+						content: "提高分辨率",
+						...(opts.fresh ? { imageFresh: true } : {}),
+					},
+				],
+				abortController: new AbortController(),
+				imageSize: "2K",
+				imageAspect: "1:1",
+			} as unknown as TextGenerationContext;
+		}
+
+		it("edits the latest output, keeps its aspect at the chosen tier, and says so", async () => {
+			const out = await png(1536, 864);
+			mocks.downloadFile.mockImplementation(async (sha: string) => ({
+				type: "base64",
+				value: out.toString("base64"),
+				mime: "image/png",
+				name: sha,
+			}));
+			mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
+			const updates = await collect(chainCtx());
+
+			expect(mocks.downloadFile).toHaveBeenCalledWith("sha-out", expect.anything());
+			const [url, init] = mocks.fetch.mock.calls[0];
+			expect(url).toBe("https://api.openai.com/v1/images/edits");
+			const form = init.body as FormData;
+			expect(form.getAll("image[]")).toHaveLength(1);
+			// 2K tier from the setting, 16:9 from the source image (setting says 1:1)
+			expect(form.get("size")).toBe("2048x1152");
+			expect(form.get("prompt")).toBe(`${CHAIN_EDIT_PREAMBLE}\n\n提高分辨率`);
+			const text = (updates[updates.length - 1] as { text: string }).text;
+			expect(text).toContain("基于上一张图编辑（1536x864 → 2048x1152）");
+			expect(text).toContain("比例沿用上一张图（16:9）");
+		});
+
+		it("generates from scratch when the user message asks for a new image", async () => {
+			mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
+			await collect(chainCtx({ fresh: true }));
+			expect(mocks.fetch.mock.calls[0][0]).toBe("https://api.openai.com/v1/images/generations");
+			expect(JSON.parse(mocks.fetch.mock.calls[0][1].body).prompt).toBe("提高分辨率");
+			expect(mocks.downloadFile).not.toHaveBeenCalled();
+		});
+	});
+
+	it("explains a moderation block and where it happened, without retrying", async () => {
+		mocks.fetch.mockResolvedValue({
+			ok: false,
+			status: 400,
+			text: async () =>
+				JSON.stringify({
+					error: {
+						message: "Your request was rejected by the safety system.",
+						code: "moderation_blocked",
+						moderation_details: { moderation_stage: "output" },
+					},
+				}),
+		});
+		const updates = await collect(ctx({ content: "cat" }));
+		expect(mocks.fetch).toHaveBeenCalledTimes(1);
+		const text = (updates[0] as { text: string }).text;
+		expect(text).toContain("拦截发生在生成结果上");
+		expect(text).toContain("从零生成时提示词太短");
+		expect(text).toContain("OpenAI 原文：Your request was rejected by the safety system.");
 	});
 
 	it("turns an API error into a readable answer without storing anything", async () => {
