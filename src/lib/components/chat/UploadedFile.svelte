@@ -14,6 +14,7 @@
 	import { decodeHeicToDataUrl } from "$lib/utils/heicPreview";
 	import { isMarkupFileName } from "$lib/imageGeneration";
 	import LucidePencil from "~icons/lucide/pencil";
+	import LucideSparkles from "~icons/lucide/sparkles";
 
 	interface Props {
 		file: MessageFile;
@@ -23,9 +24,11 @@
 		large?: boolean;
 		/** Pending image attachments for image models: open the markup editor on this image */
 		onannotate?: (dataUrl: string) => void;
+		/** Generated images: open the anime denoise tool with this image */
+		ondenoise?: (src: string) => void;
 	}
 
-	let { file, canClose = true, onclose, large = false, onannotate }: Props = $props();
+	let { file, canClose = true, onclose, large = false, onannotate, ondenoise }: Props = $props();
 
 	let isMarkup = $derived(isMarkupFileName(file.name));
 
@@ -349,6 +352,27 @@
 				}}
 			>
 				<LucidePencil class="text-xs text-white" />
+			</button>
+		{/if}
+		{#if ondenoise && !isMarkup && isDisplayableImage(file.mime)}
+			<button
+				class="absolute -top-2 z-10 grid size-6 place-items-center rounded-full border bg-black group-hover:visible dark:border-gray-700 {onannotate
+					? 'left-5'
+					: '-left-2'}"
+				class:invisible={navigator.maxTouchPoints === 0}
+				title="Open in Anime Denoise (removes the fish-scale texture of GPT images)"
+				aria-label="Denoise this image"
+				onclick={(e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					ondenoise?.(
+						file.type === "base64"
+							? `data:${file.mime};base64,${file.value}`
+							: urlNotTrailing + "/output/" + file.value
+					);
+				}}
+			>
+				<LucideSparkles class="text-xs text-white" />
 			</button>
 		{/if}
 		<!-- add a button on top that removes the image -->

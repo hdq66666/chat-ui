@@ -37,6 +37,7 @@
 	import ChatMessage from "./ChatMessage.svelte";
 	import ThinkingEffortChip from "./ThinkingEffortChip.svelte";
 	import ImageSizeChip from "./ImageSizeChip.svelte";
+	import { openAnimeDenoise } from "$lib/utils/animeDenoise";
 	import ScreenshotAnnotationModal from "./ScreenshotAnnotationModal.svelte";
 	import { pngDataUrlToFile } from "$lib/utils/artifactCapture";
 	import { imageFreshNext, markupEditingAvailable, markupRequest } from "$lib/stores/markupRequest";
@@ -1321,6 +1322,19 @@
 									onclick={() => imageFreshNext.update((v) => !v)}
 								>
 									{$imageFreshNext ? "New image" : "Edits last image"}
+								</button>
+							{/if}
+							{#if publicConfig.PUBLIC_ANIME_DENOISE_URL}
+								<button
+									type="button"
+									class="inline-flex items-center gap-1 hover:underline"
+									title="Open Anime Denoise to remove the fish-scale texture of GPT images. The ✦ button on a generated image sends that image there."
+									onclick={() =>
+										openAnimeDenoise(publicConfig.PUBLIC_ANIME_DENOISE_URL).catch((e) =>
+											error.set(e instanceof Error ? e.message : String(e))
+										)}
+								>
+									Denoise
 								</button>
 							{/if}
 							<ImageSizeChip modelId={currentModel.id} />

@@ -45,6 +45,8 @@
 	import type { ElicitationRequestPayload } from "$lib/types/McpElicitation";
 	import { page } from "$app/state";
 	import ImageLightbox from "./ImageLightbox.svelte";
+	import { openAnimeDenoise } from "$lib/utils/animeDenoise";
+	import { error as errorStore } from "$lib/stores/errors";
 	import { splitArtifactSegments, stripArtifacts } from "$lib/utils/artifacts";
 	import type { ArtifactOperation } from "$lib/utils/artifacts";
 
@@ -499,6 +501,13 @@
 							large={file.mime.startsWith("image/")}
 							onannotate={$markupEditingAvailable && file.mime.startsWith("image/")
 								? (src) => markupRequest.set({ name: file.name, src })
+								: undefined}
+							ondenoise={publicConfig.PUBLIC_ANIME_DENOISE_URL && file.mime.startsWith("image/")
+								? (src) =>
+										openAnimeDenoise(publicConfig.PUBLIC_ANIME_DENOISE_URL, {
+											name: file.name,
+											src,
+										}).catch((e) => errorStore.set(e instanceof Error ? e.message : String(e)))
 								: undefined}
 						/>
 					{/each}
