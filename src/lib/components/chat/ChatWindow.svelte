@@ -123,6 +123,7 @@
 		onstop?: () => void;
 		onretry?: (payload: { id: Message["id"]; content?: string }) => void;
 		onshowAlternateMsg?: (payload: { id: Message["id"] }) => void;
+		ondeleteMessage?: (payload: { id: Message["id"] }) => void;
 		draft?: string;
 	}
 
@@ -142,6 +143,7 @@
 		onstop,
 		onretry,
 		onshowAlternateMsg,
+		ondeleteMessage,
 	}: Props = $props();
 
 	let isReadOnly = $derived(!models.some((model) => model.id === currentModel.id));
@@ -941,6 +943,7 @@
 											chatScroll.notifyBranchSwitch();
 											onshowAlternateMsg?.(payload);
 										}}
+										ondelete={shared ? undefined : ondeleteMessage}
 									/>
 								{/each}
 								{#if turnIdx === turns.length - 1 && showPendingPlaceholder}

@@ -79,8 +79,8 @@ function endpoint(fetcher: FetchFn, baseUrl: string) {
 		patch(body?: unknown) {
 			return apiCall(fetcher, baseUrl, "PATCH", body);
 		},
-		delete() {
-			return apiCall(fetcher, baseUrl, "DELETE");
+		delete(opts?: { query?: Record<string, string | number | undefined> }) {
+			return apiCall(fetcher, baseUrl, "DELETE", undefined, opts?.query);
 		},
 	};
 }

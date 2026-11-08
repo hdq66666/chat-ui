@@ -10,6 +10,7 @@
 	// import CarbonDownload from "~icons/carbon/download";
 
 	import CarbonPen from "~icons/carbon/pen";
+	import CarbonTrashCan from "~icons/carbon/trash-can";
 	import CarbonCopy from "~icons/carbon/copy";
 	import CarbonCheckmark from "~icons/carbon/checkmark";
 	import UploadedFile from "./UploadedFile.svelte";
@@ -61,6 +62,8 @@
 		isLast?: boolean;
 		onretry?: (payload: { id: Message["id"]; content?: string }) => void;
 		onshowAlternateMsg?: (payload: { id: Message["id"] }) => void;
+		/** Delete this message's turn (or reply version); absent where deleting is not allowed */
+		ondelete?: (payload: { id: Message["id"] }) => void;
 	}
 
 	let {
@@ -74,6 +77,7 @@
 		isLast = false,
 		onretry,
 		onshowAlternateMsg,
+		ondelete,
 	}: Props = $props();
 
 	let contentEl: HTMLElement | undefined = $state();
@@ -683,6 +687,20 @@
 					>
 						<CarbonRotate360 />
 					</button>
+					{#if ondelete && !loading}
+						<button
+							class="btn rounded-xs p-1 text-xs text-gray-400 hover:text-red-500 focus:ring-0 dark:text-gray-400 dark:hover:text-red-400"
+							title="Delete"
+							aria-label="Delete this message"
+							type="button"
+							onclick={() => {
+								if (requireAuthUser()) return;
+								ondelete?.({ id: message.id });
+							}}
+						>
+							<CarbonTrashCan />
+						</button>
+					{/if}
 					{#if alternatives.length > 1 && editMsdgId === null}
 						<Alternatives
 							{message}
@@ -835,6 +853,22 @@
 							Copy
 						{/if}
 					</button>
+					{#if ondelete && !loading && !editMode}
+						<button
+							class="hidden h-5 cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-gray-400 group-hover:flex hover:flex hover:bg-gray-100 hover:text-red-500 lg:-right-2 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-red-400 {isTapped
+								? '[@media(hover:none)]:flex'
+								: ''}"
+							title="Delete"
+							type="button"
+							onclick={() => {
+								if (requireAuthUser()) return;
+								ondelete?.({ id: message.id });
+							}}
+						>
+							<CarbonTrashCan class="scale-[0.85]" />
+							Delete
+						</button>
+					{/if}
 				{/if}
 			</div>
 		</div>

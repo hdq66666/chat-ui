@@ -358,6 +358,36 @@ describe("multi-turn edit context", () => {
 		expect(ctx?.turns).toBe(2);
 	});
 
+	it("rebuilds the line from what is left after a middle turn is deleted", () => {
+		// generate o1 -> markup on o1 makes o2 -> plain follow-up makes o3; then the markup turn
+		// (the one that made o2) is deleted with scope "turn", which splices the path like this:
+		const spliced: LineageMessage[] = [
+			{ from: "system", content: "" },
+			{ from: "user", content: "draw a lighthouse", files: [] },
+			{ from: "assistant", content: "已生成", files: [out("o1")] },
+			{ from: "user", content: "add a red roof" },
+			{ from: "assistant", content: "基于上一张图编辑", files: [out("o3")] },
+		];
+		const lineage = traceEditLineage(spliced, 4);
+		// the deleted markup notes are gone; the follow-up now hangs off o1's request
+		expect(lineage.root?.text).toBe("draw a lighthouse");
+		expect(lineage.edits.map((e) => e.text)).toEqual(["add a red roof"]);
+		expect(JSON.stringify(lineage)).not.toContain("Notes for marks");
+
+		// a later markup on an output whose turn was deleted: its copy of that image is the root
+		const orphanMarkup: LineageMessage[] = [
+			{ from: "system", content: "" },
+			{ from: "user", content: "draw a lighthouse" },
+			{ from: "assistant", content: "已生成", files: [out("o1")] },
+			{ from: "user", content: notes("brighter sky"), files: marked("o2", "dddddddddddd") },
+			{ from: "assistant", content: "已按标记编辑", files: [out("o4")] },
+		];
+		const root = traceEditLineage(orphanMarkup, 4).root;
+		expect(root?.index).toBe(3);
+		expect(root?.editedFirst).toBe(true);
+		expect(root?.references.map((f) => f.value)).toEqual(["o2"]);
+	});
+
 	it("names the image roles in the order they are sent", () => {
 		const lineage = traceEditLineage(conversation, 4);
 		const plain = formatEditContext(lineage, "眼睛更生动", {

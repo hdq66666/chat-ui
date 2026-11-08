@@ -9,6 +9,15 @@ export class AbortRegistry {
 
 	private controllers = new Map<string, Set<AbortController>>();
 
+	/**
+	 * Runs that may still write the conversation. A controller leaves `controllers` as soon as it
+	 * is aborted, but the run still saves the whole messages array once more after that; a run
+	 * token is held until that last save. Tokens expire so a run that died without releasing
+	 * cannot block the conversation for good.
+	 */
+	private runs = new Map<string, Map<symbol, number>>();
+	static readonly RUN_TOKEN_TTL_MS = 15 * 60 * 1000;
+
 	public static getInstance(): AbortRegistry {
 		if (!AbortRegistry.instance) {
 			AbortRegistry.instance = new AbortRegistry();
@@ -44,6 +53,36 @@ export class AbortRegistry {
 			}
 		}
 		this.controllers.delete(conversationId);
+	}
+
+	/** Mark a run that writes this conversation; call the returned function after its last write. */
+	public beginRun(conversationId: string): () => void {
+		const key = conversationId.toString();
+		const token = Symbol(key);
+		let runs = this.runs.get(key);
+		if (!runs) {
+			runs = new Map();
+			this.runs.set(key, runs);
+		}
+		runs.set(token, Date.now());
+		return () => {
+			const current = this.runs.get(key);
+			current?.delete(token);
+			if (current?.size === 0) this.runs.delete(key);
+		};
+	}
+
+	/** Whether a run on this pod may still write the conversation (active or not yet saved). */
+	public isBusy(conversationId: string, now = Date.now()): boolean {
+		const key = conversationId.toString();
+		if (this.controllers.get(key)?.size) return true;
+		const runs = this.runs.get(key);
+		if (!runs) return false;
+		for (const [token, startedAt] of runs) {
+			if (now - startedAt > AbortRegistry.RUN_TOKEN_TTL_MS) runs.delete(token);
+		}
+		if (runs.size === 0) this.runs.delete(key);
+		return Boolean(runs.size);
 	}
 
 	public unregister(conversationId: string, controller: AbortController) {

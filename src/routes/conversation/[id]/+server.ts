@@ -445,6 +445,8 @@ export async function POST({ request, locals, params, getClientAddress }) {
 			const conversationKey = convId.toString();
 			const ctrl = new AbortController();
 			abortRegistry.register(conversationKey, ctrl);
+			// held until after the final save below; message deletion waits for it
+			const endRun = abortRegistry.beginRun(conversationKey);
 
 			// Cross-pod and pre-first-token abort path. The in-process registry
 			// only works when the stop request lands on this pod, and the cached
@@ -809,6 +811,7 @@ export async function POST({ request, locals, params, getClientAddress }) {
 			});
 			clearInterval(abortMarkerWatcher);
 			abortRegistry.unregister(conversationKey, ctrl);
+			endRun();
 
 			// Consume the stop marker once the stop has been honored and the
 			// interrupted state persisted. Markers are conversation-scoped, so a

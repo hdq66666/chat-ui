@@ -2,7 +2,7 @@
 	import ChatWindow from "$lib/components/chat/ChatWindow.svelte";
 	import { consumePendingFiles } from "$lib/utils/pendingFiles";
 	import { isAborted } from "$lib/stores/isAborted";
-	import { onMount, untrack } from "svelte";
+	import { onMount, tick, untrack } from "svelte";
 	import { page } from "$app/state";
 	import { beforeNavigate, replaceState } from "$app/navigation";
 	import { UrlDependency } from "$lib/types/UrlDependency";
@@ -40,6 +40,12 @@
 	import { noteServerNow } from "$lib/utils/clockSkew.svelte";
 	import { useAPIClient, handleResponse } from "$lib/APIClient";
 	import SharePreviewTags from "$lib/components/SharePreviewTags.svelte";
+	import DeleteMessageModal from "$lib/components/chat/DeleteMessageModal.svelte";
+	import {
+		describeTurnDeletion,
+		type DeleteScope,
+		type TurnDeletionInfo,
+	} from "$lib/utils/tree/deleteTurn";
 	import { mlAssistant } from "$lib/stores/mlAssistant.svelte";
 	import { ML_ASSISTANT_MODE } from "$lib/utils/mlAssistantFlag";
 	import { planStepsToMlSteps } from "$lib/utils/planProgress";
@@ -607,6 +613,71 @@
 		});
 	}
 
+	// Deleting a turn (or one reply version). The server refuses while a reply is generating,
+	// because a run saves the whole message list and would bring deleted messages back.
+	let deleteTarget = $state<{
+		id: Message["id"];
+		info: TurnDeletionInfo;
+		prompt: string;
+		fromReply: boolean;
+	} | null>(null);
+	let deleting = $state(false);
+
+	function onDeleteMessage(payload: { id: Message["id"] }) {
+		if (requireAuthUser()) return;
+		if ($loading || pending) {
+			error.set("Wait for the reply to finish before deleting messages.");
+			return;
+		}
+		try {
+			const info = describeTurnDeletion({ rootMessageId, messages }, payload.id);
+			deleteTarget = {
+				id: payload.id,
+				info,
+				prompt: messages.find((m) => m.id === info.userId)?.content ?? "",
+				fromReply: messages.find((m) => m.id === payload.id)?.from === "assistant",
+			};
+		} catch (err) {
+			error.set(err instanceof Error ? err.message : String(err));
+		}
+	}
+
+	async function confirmDeleteMessage(scope: DeleteScope) {
+		const target = deleteTarget;
+		if (!target || deleting) return;
+		deleting = true;
+		const leafId = messagesPath.at(-1)?.id;
+		const runConvId = convId;
+		try {
+			const res = await useAPIClient()
+				.conversations({ id: runConvId })
+				.message({ messageId: target.id })
+				.delete({ query: { scope } });
+			if (res.error) {
+				const body = res.error as { message?: string } | string;
+				throw new Error(typeof body === "string" ? body : (body.message ?? `HTTP ${res.status}`));
+			}
+			const result = handleResponse(res) as { removedIds: string[]; fallbackId: string };
+			deleteTarget = null;
+			await Promise.all([safeInvalidate(UrlDependency.Conversation), convsStore.refresh()]);
+			// the refreshed list reaches `messages` through the sync effect; pick the branch after that,
+			// or the sync would reset the path to the last message again
+			const removed = new Set(result.removedIds);
+			for (let i = 0; i < 50 && messages.some((m) => removed.has(m.id)); i++) {
+				await tick();
+				await new Promise((resolve) => setTimeout(resolve, 20));
+			}
+			if (convId !== runConvId) return;
+			// stay on the current branch if it survived, else continue from where the turn hung
+			const keep = leafId && !result.removedIds.includes(leafId) ? leafId : result.fallbackId;
+			messagesPath = createMessagesPath(messages, keep);
+		} catch (err) {
+			error.set(err instanceof Error ? err.message : String(err));
+		} finally {
+			deleting = false;
+		}
+	}
+
 	async function onShowAlternateMsg(payload: { id: Message["id"] }) {
 		const msgId = payload.id;
 		messagesPath = createMessagesPath(messages, msgId);
@@ -738,10 +809,22 @@
 	onmessage={onMessage}
 	onretry={onRetry}
 	onshowAlternateMsg={onShowAlternateMsg}
+	ondeleteMessage={data.shared ? undefined : onDeleteMessage}
 	onstop={stopGeneration}
 	models={data.models}
 	currentModel={findCurrentModel(data.models, data.oldModels, data.model)}
 />
+
+{#if deleteTarget}
+	<DeleteMessageModal
+		info={deleteTarget.info}
+		prompt={deleteTarget.prompt}
+		fromReply={deleteTarget.fromReply}
+		busy={deleting}
+		onclose={() => (deleteTarget = null)}
+		onconfirm={confirmDeleteMessage}
+	/>
+{/if}
 
 {#if showSubscribeModal}
 	<SubscribeModal close={() => (showSubscribeModal = false)} />
