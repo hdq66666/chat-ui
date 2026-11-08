@@ -13,6 +13,7 @@
 	import CarbonCopy from "~icons/carbon/copy";
 	import CarbonCheckmark from "~icons/carbon/checkmark";
 	import UploadedFile from "./UploadedFile.svelte";
+	import { markupEditingAvailable, markupRequest } from "$lib/stores/markupRequest";
 
 	import MarkdownRenderer from "./MarkdownRenderer.svelte";
 	import OpenReasoningResults from "./OpenReasoningResults.svelte";
@@ -492,7 +493,14 @@
 			{#if message.files?.length}
 				<div class="flex h-fit flex-wrap gap-x-5 gap-y-2">
 					{#each message.files as file (file.value)}
-						<UploadedFile {file} canClose={false} large={file.mime.startsWith("image/")} />
+						<UploadedFile
+							{file}
+							canClose={false}
+							large={file.mime.startsWith("image/")}
+							onannotate={$markupEditingAvailable && file.mime.startsWith("image/")
+								? (src) => markupRequest.set({ name: file.name, src })
+								: undefined}
+						/>
 					{/each}
 				</div>
 			{/if}

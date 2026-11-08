@@ -331,7 +331,7 @@
 				>Markup</span
 			>
 		{/if}
-		{#if onannotate && !isMarkup && (heicPreview || (isDisplayableImage(file.mime) && file.type === "base64"))}
+		{#if onannotate && !isMarkup && (heicPreview || isDisplayableImage(file.mime))}
 			<button
 				class="absolute -top-2 -left-2 z-10 grid size-6 place-items-center rounded-full border bg-black group-hover:visible dark:border-gray-700"
 				class:invisible={navigator.maxTouchPoints === 0}
@@ -340,7 +340,12 @@
 				onclick={(e) => {
 					e.preventDefault();
 					e.stopPropagation();
-					onannotate?.(heicPreview ?? `data:${file.mime};base64,${file.value}`);
+					onannotate?.(
+						heicPreview ??
+							(file.type === "base64"
+								? `data:${file.mime};base64,${file.value}`
+								: urlNotTrailing + "/output/" + file.value)
+					);
 				}}
 			>
 				<LucidePencil class="text-xs text-white" />

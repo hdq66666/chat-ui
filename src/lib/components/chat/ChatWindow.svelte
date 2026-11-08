@@ -39,6 +39,7 @@
 	import ImageSizeChip from "./ImageSizeChip.svelte";
 	import ScreenshotAnnotationModal from "./ScreenshotAnnotationModal.svelte";
 	import { pngDataUrlToFile } from "$lib/utils/artifactCapture";
+	import { markupEditingAvailable, markupRequest } from "$lib/stores/markupRequest";
 	import {
 		formatMarkupNotes,
 		isMarkupFileName,
@@ -347,17 +348,56 @@
 		}, 500);
 	});
 
-	/** Pending image being marked up for a GPT Image markup-guided edit */
-	let markupTarget = $state<{ name: string; dataUrl: string } | null>(null);
+	/**
+	 * Image being marked up for a GPT Image markup-guided edit: a pending
+	 * attachment, or (fromConversation) an image already in the conversation,
+	 * such as a generated one, which gets attached when the markup is confirmed.
+	 */
+	let markupTarget = $state<{ name: string; dataUrl: string; fromConversation?: boolean } | null>(
+		null
+	);
+
+	$effect(() => {
+		markupEditingAvailable.set(Boolean(currentModel.imageGeneration) && !shared);
+	});
+	onDestroy(() => markupEditingAvailable.set(false));
+
+	$effect(() => {
+		const request = $markupRequest;
+		if (!request) return;
+		markupRequest.set(undefined);
+		if (!currentModel.imageGeneration || shared) return;
+		markupTarget = { name: request.name, dataUrl: request.src, fromConversation: true };
+	});
+
+	async function fetchAsFile(src: string, name: string): Promise<File | undefined> {
+		try {
+			const res = await fetch(src);
+			if (!res.ok) return undefined;
+			const blob = await res.blob();
+			return new File([blob], name, { type: blob.type || "image/png" });
+		} catch {
+			return undefined;
+		}
+	}
 
 	// The API edits the first image and takes the markup layer separately, so the
 	// marked image moves to the front and one layer (the latest) is kept.
-	function applyMarkup(layerDataUrl: string, notes: string[]) {
+	async function applyMarkup(layerDataUrl: string, notes: string[]) {
 		const target = markupTarget;
 		markupTarget = null;
 		if (!target) return;
-		const images = files.filter((f) => !isMarkupFileName(f.name));
-		const i = images.findIndex((f) => f.name === target.name);
+		let images = files.filter((f) => !isMarkupFileName(f.name));
+		let i = images.findIndex((f) => f.name === target.name);
+		if (i < 0 && target.fromConversation) {
+			const file = await fetchAsFile(target.dataUrl, target.name);
+			if (!file) {
+				error.set("Could not load that image for editing.");
+				return;
+			}
+			images = [file, ...files.filter((f) => !isMarkupFileName(f.name))];
+			i = 0;
+		}
 		if (i < 0) return;
 		files = [
 			images[i],
