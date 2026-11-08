@@ -31,9 +31,15 @@
 		"border-red-200 text-red-700 hover:bg-red-50 dark:border-red-900/60 dark:text-red-400 dark:hover:bg-red-950/40";
 </script>
 
-<Modal onclose={() => !busy && onclose()} width="w-[90dvw] md:w-[480px]">
+<Modal
+	onclose={() => !busy && onclose()}
+	width="w-[90dvw] md:w-[480px]"
+	labelledby="delete-message-title"
+>
 	<div class="flex w-full flex-col gap-4 p-6">
-		<h2 class="text-xl font-semibold text-gray-800 dark:text-gray-200">Delete message</h2>
+		<h2 id="delete-message-title" class="text-xl font-semibold text-gray-800 dark:text-gray-200">
+			Delete message
+		</h2>
 		<p
 			class="line-clamp-3 rounded-lg bg-gray-50 px-3 py-2 text-sm whitespace-pre-wrap text-gray-600 dark:bg-gray-700/50 dark:text-gray-300"
 		>

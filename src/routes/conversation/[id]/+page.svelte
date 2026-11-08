@@ -162,6 +162,10 @@
 		isRetry?: boolean;
 		resumeElicitationId?: string;
 	}): Promise<void> {
+		if (deleting) {
+			error.set("Wait until the messages are deleted.");
+			return;
+		}
 		try {
 			stopRequestedFor = null;
 			$isAborted = false;
@@ -656,7 +660,8 @@
 				throw new Error(typeof body === "string" ? body : (body.message ?? `HTTP ${res.status}`));
 			}
 			const result = handleResponse(res) as { removedIds: string[]; fallbackId: string };
-			deleteTarget = null;
+			// the dialog stays open (and sends stay blocked) until the new tree is in place: a send
+			// from a stale path could hang off a deleted message
 			await Promise.all([safeInvalidate(UrlDependency.Conversation), convsStore.refresh()]);
 			// the refreshed list reaches `messages` through the sync effect; pick the branch after that,
 			// or the sync would reset the path to the last message again
@@ -666,6 +671,9 @@
 				await new Promise((resolve) => setTimeout(resolve, 20));
 			}
 			if (convId !== runConvId) return;
+			if (messages.some((m) => removed.has(m.id))) {
+				throw new Error("The messages were deleted, but the page did not refresh. Reload it.");
+			}
 			// stay on the current branch if it survived, else continue from where the turn hung
 			const keep = leafId && !result.removedIds.includes(leafId) ? leafId : result.fallbackId;
 			messagesPath = createMessagesPath(messages, keep);
@@ -673,6 +681,7 @@
 			error.set(err instanceof Error ? err.message : String(err));
 		} finally {
 			deleting = false;
+			deleteTarget = null;
 		}
 	}
 

@@ -1,4 +1,4 @@
-import { describe, expect, it, afterEach, beforeAll } from "vitest";
+import { describe, expect, it, afterEach, beforeAll, vi } from "vitest";
 import { ObjectId } from "mongodb";
 import { v4 } from "uuid";
 import superjson from "superjson";
@@ -330,6 +330,85 @@ describe.sequential("DELETE /api/v2/conversations/[id]/message/[messageId]", () 
 
 		await callDelete(locals, id, t.id.u3);
 		expect(await storedShas(id)).toEqual([]);
+	});
+
+	it("reports a conflict when the conversation changed after it was read", async () => {
+		const { locals } = await createTestUser();
+		const t = linearTree();
+		const conv = await createTestConversation(locals, {
+			messages: t.messages,
+			rootMessageId: t.rootMessageId,
+		});
+		// the handler reads a copy that is older than what is stored now
+		const stale = { ...conv, updatedAt: new Date(conv.updatedAt.getTime() - 60_000) };
+		const spy = vi
+			.spyOn(collections.conversations, "findOne")
+			.mockResolvedValueOnce(stale as never);
+		try {
+			expect(await statusOf(callDelete(locals, conv._id.toString(), t.id.u2))).toBe(409);
+		} finally {
+			spy.mockRestore();
+		}
+		const after = await collections.conversations.findOne({ _id: conv._id });
+		expect(after?.messages).toHaveLength(7);
+	});
+
+	it("deletes from a stored conversation that has no updatedAt", async () => {
+		const { locals } = await createTestUser();
+		const t = linearTree();
+		const conv = await createTestConversation(locals, {
+			messages: t.messages,
+			rootMessageId: t.rootMessageId,
+		});
+		await collections.conversations.updateOne({ _id: conv._id }, { $unset: { updatedAt: "" } });
+		expect(await statusOf(callDelete(locals, conv._id.toString(), t.id.u2))).toBe(200);
+		const after = await collections.conversations.findOne({ _id: conv._id });
+		expect(after?.messages).toHaveLength(5);
+	});
+
+	it("refuses while any pod records a live turn for the conversation", async () => {
+		const { locals } = await createTestUser();
+		const t = linearTree();
+		const conv = await createTestConversation(locals, {
+			messages: t.messages,
+			rootMessageId: t.rootMessageId,
+		});
+		await collections.turnStates.insertOne({
+			conversationId: conv._id,
+			messageId: t.id.a3,
+			status: "running",
+			producerId: "other-pod",
+			createdAt: new Date(),
+			updatedAt: new Date(),
+		} as never);
+		try {
+			expect(await statusOf(callDelete(locals, conv._id.toString(), t.id.u2))).toBe(409);
+			await collections.turnStates.updateOne(
+				{ conversationId: conv._id },
+				{ $set: { status: "done" } }
+			);
+			expect(await statusOf(callDelete(locals, conv._id.toString(), t.id.u2))).toBe(200);
+		} finally {
+			await collections.turnStates.deleteMany({ conversationId: conv._id });
+		}
+	});
+
+	it("refuses while a send holds its run token, from before its first read", async () => {
+		const { locals } = await createTestUser();
+		const t = linearTree();
+		const conv = await createTestConversation(locals, {
+			messages: t.messages,
+			rootMessageId: t.rootMessageId,
+		});
+		const id = conv._id.toString();
+		const claim = AbortRegistry.getInstance().claimRun(id);
+		expect(await statusOf(callDelete(locals, id, t.id.u2))).toBe(409);
+		// handed over to the stream: still busy until the stream releases it
+		const endRun = claim.handOver();
+		claim.releaseUnlessHandedOver();
+		expect(await statusOf(callDelete(locals, id, t.id.u2))).toBe(409);
+		endRun();
+		expect(await statusOf(callDelete(locals, id, t.id.u2))).toBe(200);
 	});
 
 	it("throws 404 for non-existent message", async () => {

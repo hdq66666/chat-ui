@@ -49,8 +49,14 @@ export const DELETE: RequestHandler = async ({ locals, params, url }) => {
 	const conv = await collections.conversations.findOne({ _id: convId, ...authCondition(locals) });
 	if (!conv) error(404, "Conversation not found");
 
-	// A run rewrites the whole messages array when it saves, which would bring deleted messages back
-	if (AbortRegistry.getInstance().isBusy(id) || hasLiveTurn(conv.messages)) {
+	// A run rewrites the whole messages array when it saves, which would bring deleted messages back.
+	// Three signals: a send on this pod (from before its first read to its last save), the turn
+	// states every pod writes (before the run's first save), and the states saved in the messages.
+	const liveTurnState = await collections.turnStates.findOne({
+		conversationId: convId,
+		status: { $in: ["running", "waiting", "awaiting_input"] },
+	});
+	if (AbortRegistry.getInstance().isBusy(id) || liveTurnState || hasLiveTurn(conv.messages)) {
 		error(409, "A reply is still being generated in this conversation. Delete after it finishes.");
 	}
 

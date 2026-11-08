@@ -6,6 +6,7 @@ import { models, validModelIdSchema } from "$lib/server/models";
 import { ERROR_MESSAGES } from "$lib/stores/errors";
 import type { Message } from "$lib/types/Message";
 import { error } from "@sveltejs/kit";
+import type { RequestEvent } from "./$types";
 import { ObjectId } from "mongodb";
 import { z } from "zod";
 import {
@@ -46,7 +47,26 @@ import { applyConversationSettings } from "$lib/server/conversationSettings";
 // so markers normally live far shorter than this.
 const STOP_MARKER_GRACE_MS = 5_000;
 
-export async function POST({ request, locals, params, getClientAddress }) {
+type RunClaim = ReturnType<AbortRegistry["claimRun"]>;
+
+/**
+ * A send reads the conversation, then writes its whole messages array back (before the stream and
+ * on every save). Message deletion must not run in between, so the send holds a run token from
+ * before its first read; the stream takes it over, and any other exit releases it.
+ */
+export async function POST(event: RequestEvent) {
+	const run = AbortRegistry.getInstance().claimRun(event.params.id ?? "");
+	try {
+		return await handlePost(event, run);
+	} finally {
+		run.releaseUnlessHandedOver();
+	}
+}
+
+async function handlePost(
+	{ request, locals, params, getClientAddress }: RequestEvent,
+	run: RunClaim
+) {
 	const id = z.string().parse(params.id);
 	const convId = new ObjectId(id);
 	const promptedAt = new Date();
@@ -443,10 +463,11 @@ export async function POST({ request, locals, params, getClientAddress }) {
 	const stream = new ReadableStream({
 		async start(controller) {
 			const conversationKey = convId.toString();
+			// Taken over first, synchronously: POST releases the token on return unless handed over.
+			// Held until after the final save below; message deletion waits for it.
+			const endRun = run.handOver();
 			const ctrl = new AbortController();
 			abortRegistry.register(conversationKey, ctrl);
-			// held until after the final save below; message deletion waits for it
-			const endRun = abortRegistry.beginRun(conversationKey);
 
 			// Cross-pod and pre-first-token abort path. The in-process registry
 			// only works when the stop request lands on this pod, and the cached
@@ -799,19 +820,25 @@ export async function POST({ request, locals, params, getClientAddress }) {
 
 			// CAS: misses when a park moved the state on mid-run, and the parked
 			// state (waiting / awaiting_input) stands — nothing is emitted.
-			const endedUpdate = await turnEnded(turnKey, {
-				failed: hasError,
-				...(hasError ? { error: "The turn ended on an error." } : {}),
-			});
-			if (endedUpdate) await update(endedUpdate);
+			try {
+				const endedUpdate = await turnEnded(turnKey, {
+					failed: hasError,
+					...(hasError ? { error: "The turn ended on an error." } : {}),
+				});
+				if (endedUpdate) await update(endedUpdate);
 
-			await persistConversation();
-			await writer.finish({
-				status: hasError ? "error" : abortedByUser ? "interrupted" : "completed",
-			});
-			clearInterval(abortMarkerWatcher);
-			abortRegistry.unregister(conversationKey, ctrl);
-			endRun();
+				await persistConversation();
+				await writer.finish({
+					status: hasError ? "error" : abortedByUser ? "interrupted" : "completed",
+				});
+			} finally {
+				// Runs even when the final save fails. cancel() saves only while !doneStreaming,
+				// so mark the stream done before giving up the run token.
+				clearInterval(abortMarkerWatcher);
+				abortRegistry.unregister(conversationKey, ctrl);
+				doneStreaming = true;
+				endRun();
+			}
 
 			// Consume the stop marker once the stop has been honored and the
 			// interrupted state persisted. Markers are conversation-scoped, so a
@@ -825,16 +852,21 @@ export async function POST({ request, locals, params, getClientAddress }) {
 					.catch((err) => logger.warn(err, "Failed to consume stop marker"));
 			}
 
-			// used to detect if cancel() is called bc of interrupt or just because the connection closes
-			doneStreaming = true;
 			if (!clientDetached) {
 				controller.close();
 			}
 		},
 		async cancel() {
-			if (doneStreaming) return;
+			// doneStreaming (set above once the final save ran) tells an interrupt apart from a
+			// client that simply went away
 			clientDetached = true;
-			await persistConversation();
+			if (doneStreaming) return;
+			const endSave = abortRegistry.beginRun(convId.toString());
+			try {
+				await persistConversation();
+			} finally {
+				endSave();
+			}
 		},
 	});
 

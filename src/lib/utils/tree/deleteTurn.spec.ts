@@ -106,6 +106,50 @@ describe("deleteTurn", () => {
 		expect(() => deleteTurn(conv, "a1x", "reply" as never)).toThrow(DeleteTurnError);
 	});
 
+	it("puts the next prompt beside an edited version of the deleted prompt", () => {
+		// a1 ─ u2 ─ a2 ─ u3 ─ a3, and u2' is an edited version of u2 (also under a1)
+		const conv = tree([
+			["s", "system"],
+			["u1", "user", "s"],
+			["a1", "assistant", "u1"],
+			["u2", "user", "a1"],
+			["a2", "assistant", "u2"],
+			["u3", "user", "a2"],
+			["a3", "assistant", "u3"],
+			["u2e", "user", "a1"],
+			["a2e", "assistant", "u2e"],
+		]);
+		const { messages } = deleteTurn(conv, "u2", "turn");
+		// u3 takes u2's slot, so u3 and u2' are now alternatives under a1
+		expect(messages.find((m) => m.id === "a1")?.children).toEqual(["u3", "u2e"]);
+		expect(path({ rootMessageId: "s", messages }, "a3")).toEqual(["s", "u1", "a1", "u3", "a3"]);
+	});
+
+	it("handles a prompt without a reply and the first turn under the system message", () => {
+		const unanswered = tree([
+			["s", "system"],
+			["u1", "user", "s"],
+			["a1", "assistant", "u1"],
+			["u2", "user", "a1"],
+		]);
+		expect(describeTurnDeletion(unanswered, "u2")).toEqual({
+			userId: "u2",
+			parentId: "a1",
+			replyCount: 0,
+			laterCount: 0,
+		});
+		expect(deleteTurn(unanswered, "u2", "turn").messages.map((m) => m.id)).toEqual([
+			"s",
+			"u1",
+			"a1",
+		]);
+		// deleting the first turn moves the rest of the conversation up under the system message
+		const { messages, fallbackId } = deleteTurn(linear(), "u1", "turn");
+		expect(fallbackId).toBe("s");
+		expect(messages.find((m) => m.id === "s")?.children).toEqual(["u2"]);
+		expect(path({ rootMessageId: "s", messages }, "a3")).toEqual(["s", "u2", "a2", "u3", "a3"]);
+	});
+
 	it("describes what each choice removes", () => {
 		expect(describeTurnDeletion(linear(), "a1")).toEqual({
 			userId: "u1",

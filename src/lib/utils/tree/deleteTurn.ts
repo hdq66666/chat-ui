@@ -12,7 +12,9 @@ import type { Tree, TreeId, TreeNode } from "./tree";
  * - "turn": remove the turn and keep what came after it. The next user messages (children of the
  *   removed replies) are attached to the turn's parent in its place, so later requests are built
  *   from a history that no longer contains the turn. Same model as Open WebUI's message delete
- *   (removes the message and its direct children, reparents the grandchildren).
+ *   (removes the message and its direct children, reparents the grandchildren). When the parent
+ *   also has other children (an edited version of the deleted prompt), the moved-up prompts sit
+ *   next to them and show as alternatives of each other.
  * - "after": remove the turn and everything after it on its branches.
  *
  * Every remaining message keeps its `ancestors` as a root path (removed ids filtered out) and its

@@ -10,10 +10,10 @@ export class AbortRegistry {
 	private controllers = new Map<string, Set<AbortController>>();
 
 	/**
-	 * Runs that may still write the conversation. A controller leaves `controllers` as soon as it
-	 * is aborted, but the run still saves the whole messages array once more after that; a run
-	 * token is held until that last save. Tokens expire so a run that died without releasing
-	 * cannot block the conversation for good.
+	 * Requests that may still write the conversation's whole messages array: a send holds a token
+	 * from before it reads the conversation until its stream's last save (a controller leaves
+	 * `controllers` as soon as it is aborted, which is earlier). Tokens expire, so a request that
+	 * died without releasing cannot block the conversation for good.
 	 */
 	private runs = new Map<string, Map<symbol, number>>();
 	static readonly RUN_TOKEN_TTL_MS = 15 * 60 * 1000;
@@ -72,10 +72,31 @@ export class AbortRegistry {
 		};
 	}
 
-	/** Whether a run on this pod may still write the conversation (active or not yet saved). */
+	/**
+	 * A token for a request that may start a run: hand it over to the run, or release it when the
+	 * request ends without one. Releasing twice is harmless.
+	 */
+	public claimRun(conversationId: string) {
+		const release = this.beginRun(conversationId);
+		let handedOver = false;
+		return {
+			/** The run takes the token; it releases it after its last write. */
+			handOver: () => {
+				handedOver = true;
+				return release;
+			},
+			releaseUnlessHandedOver: () => {
+				if (!handedOver) release();
+			},
+		};
+	}
+
+	/**
+	 * Whether a request on this pod may still write the conversation. Only tokens count: they
+	 * expire, whereas a controller leaked by a failed run would block deletes until a restart.
+	 */
 	public isBusy(conversationId: string, now = Date.now()): boolean {
 		const key = conversationId.toString();
-		if (this.controllers.get(key)?.size) return true;
 		const runs = this.runs.get(key);
 		if (!runs) return false;
 		for (const [token, startedAt] of runs) {
