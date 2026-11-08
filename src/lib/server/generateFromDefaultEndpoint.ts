@@ -18,7 +18,9 @@ export async function* generateFromDefaultEndpoint({
 }): AsyncGenerator<MessageUpdate, string, undefined> {
 	try {
 		// Choose endpoint based on provided modelId, else fall back to taskModel
-		const model = modelId ? (models.find((m) => m.id === modelId) ?? taskModel) : taskModel;
+		const requested = modelId ? models.find((m) => m.id === modelId) : undefined;
+		// Image models have no chat endpoint (e.g. titles for an image conversation)
+		const model = requested && !requested.imageGeneration ? requested : taskModel;
 		const endpoint = await model.getEndpoint();
 		const tokenStream = await endpoint({ messages, preprompt, generateSettings, locals });
 

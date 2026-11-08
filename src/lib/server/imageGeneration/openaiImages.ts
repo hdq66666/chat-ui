@@ -46,6 +46,8 @@ let dispatcherTimeout = 0;
  */
 function getDispatcher(ms: number): Agent {
 	if (!dispatcher || dispatcherTimeout !== ms) {
+		// 超时配置在运行中改了（ConfigManager）：关掉旧连接池再换
+		void dispatcher?.close().catch(() => undefined);
 		dispatcher = new Agent({ headersTimeout: ms, bodyTimeout: ms, connectTimeout: 30_000 });
 		dispatcherTimeout = ms;
 	}
@@ -82,6 +84,30 @@ function lastUserMessage(ctx: TextGenerationContext) {
 		if (ctx.messages[i].from === "user") return ctx.messages[i];
 	}
 	return undefined;
+}
+
+const CLIPBOARD_MIME = "application/vnd.chatui.clipboard";
+
+/**
+ * 长粘贴（约 4000 字以上）在前端会变成一个 clipboard 附件，聊天模型由
+ * preprocessMessages 把它拼到正文前面；生图不走那条路，所以在这里同样拼上。
+ */
+async function buildPrompt(ctx: TextGenerationContext) {
+	const user = lastUserMessage(ctx);
+	const files = user?.files ?? [];
+	const pasted: string[] = [];
+	for (const file of files.filter((f) => f.mime === CLIPBOARD_MIME)) {
+		const raw = file.type === "base64" ? file : await downloadFile(file.value, ctx.conv._id);
+		pasted.push(Buffer.from(raw.value, "base64").toString("utf-8"));
+	}
+	const prompt = [...pasted, user?.content ?? ""]
+		.map((part) => part.trim())
+		.filter(Boolean)
+		.join("\n\n");
+	const ignored = files.filter(
+		(f) => !f.mime?.startsWith("image/") && f.mime !== CLIPBOARD_MIME
+	).length;
+	return { prompt, ignored };
 }
 
 const editInputProcessor = makeImageProcessor({
@@ -143,7 +169,10 @@ async function callImagesApi(
 		form.append("size", params.size);
 		form.append("n", "1");
 		form.append("output_format", fmt);
-		for (const [k, v] of Object.entries(optional)) form.append(k, v);
+		// moderation 只确认 generations 支持，edits 不发，免得被拒
+		for (const [k, v] of Object.entries(optional)) {
+			if (k !== "moderation") form.append(k, v);
+		}
 		for (const input of params.inputs) {
 			form.append(
 				"image[]",
@@ -185,6 +214,22 @@ async function callImagesApi(
 	return json;
 }
 
+/** undici 把网络/超时错误包成 "fetch failed"，真正原因在 cause 里 */
+function errorDetail(err: unknown): string {
+	if (err && typeof err === "object" && "status" in err && "body" in err) {
+		// SvelteKit 的 HttpError（如 downloadFile 的 404/403）
+		const body = (err as { body?: { message?: string } }).body;
+		return `${(err as { status: number }).status} ${body?.message ?? ""}`.trim();
+	}
+	if (!(err instanceof Error)) return String(err);
+	const cause = (err as { cause?: unknown }).cause;
+	if (cause && typeof cause === "object") {
+		const c = cause as { message?: string; code?: string };
+		return `${err.message}（${[c.code, c.message].filter(Boolean).join(" ")}）`;
+	}
+	return err.message;
+}
+
 function describeError(err: unknown): string {
 	if (err instanceof ImageApiError) {
 		if (err.code === "moderation_blocked") return `请求被 OpenAI 安全审核拦截：${err.message}`;
@@ -192,10 +237,11 @@ function describeError(err: unknown): string {
 		if (err.status === 429) return `OpenAI 限流或额度不足（429）：${err.message}`;
 		return `生图失败（${err.status}）：${err.message}`;
 	}
-	if (err instanceof Error && (err.name === "TimeoutError" || /timeout/i.test(err.message))) {
+	const detail = errorDetail(err);
+	if ((err instanceof Error && err.name === "TimeoutError") || /timeout/i.test(detail)) {
 		return "生图超时，请稍后重试或降低尺寸。";
 	}
-	return `生图失败：${err instanceof Error ? err.message : String(err)}`;
+	return `生图失败：${detail}`;
 }
 
 function isAbort(ctx: TextGenerationContext, err: unknown) {
@@ -207,20 +253,18 @@ export async function* generateImage(
 ): AsyncGenerator<MessageUpdate, undefined, undefined> {
 	const dims = resolveImageDimensions(ctx.imageSize, ctx.imageAspect);
 	const violation = imageSizeViolation(dims.width, dims.height);
-	const user = lastUserMessage(ctx);
-	const prompt = (user?.content ?? "").trim();
-
 	if (violation) {
 		yield finalAnswer(`尺寸 ${dims.size} 不符合 OpenAI 规则：${violation}`);
-		return;
-	}
-	if (!prompt) {
-		yield finalAnswer("请用文字描述要生成或修改的图片。");
 		return;
 	}
 
 	const startedAt = Date.now();
 	try {
+		const { prompt, ignored } = await buildPrompt(ctx);
+		if (!prompt) {
+			yield finalAnswer("请用文字描述要生成或修改的图片。");
+			return;
+		}
 		const { inputs, skipped } = await loadEditInputs(ctx);
 		const complexity = effectiveComplexity(ctx);
 		const mode = inputs.length ? "edit" : "generate";
@@ -257,16 +301,14 @@ export async function* generateImage(
 		if (dims.width * dims.height > IMAGE_STABLE_MAX_PIXELS) {
 			notes.push("超过 2560×1440 的尺寸 OpenAI 标为实验性。");
 		}
+		if (ignored) notes.push(`有 ${ignored} 个非图片附件未发送（生图模型只接收文字和图片）。`);
 		if (skipped)
 			notes.push(`附件图片超过 ${EDIT_INPUT_MAX_IMAGES} 张，多出的 ${skipped} 张未发送。`);
 		yield finalAnswer(notes.join("\n"));
 	} catch (err) {
 		// 用户停止：conversation 路由会自己补一条 interrupted 的最终回答
 		if (isAbort(ctx, err)) return;
-		logger.error(
-			{ err: err instanceof Error ? err.message : String(err), model: ctx.model.id },
-			"[image] failed"
-		);
+		logger.error({ err: errorDetail(err), model: ctx.model.id }, "[image] failed");
 		yield finalAnswer(describeError(err));
 	}
 }

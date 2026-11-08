@@ -193,6 +193,61 @@ describe("generateImage", () => {
 		expect(mocks.downloadFile).toHaveBeenCalledTimes(2);
 	});
 
+	it("puts long pasted text (clipboard attachment) in front of the typed prompt", async () => {
+		mocks.downloadFile.mockResolvedValue({
+			type: "base64",
+			value: Buffer.from("a very long pasted scene description").toString("base64"),
+			mime: "application/vnd.chatui.clipboard",
+			name: "clip",
+		});
+		mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
+		const c = ctx({ content: "watercolor style" });
+		const user = (c as unknown as { messages: Array<{ files?: unknown[] }> }).messages[2];
+		user.files = [
+			{ type: "hash", value: "sha-clip", mime: "application/vnd.chatui.clipboard", name: "clip" },
+			{ type: "hash", value: "sha-doc", mime: "text/plain", name: "notes.txt" },
+		];
+		const updates = await collect(c);
+		const body = JSON.parse(mocks.fetch.mock.calls[0][1].body);
+		expect(body.prompt).toBe("a very long pasted scene description\n\nwatercolor style");
+		expect((updates[updates.length - 1] as { text: string }).text).toContain(
+			"1 个非图片附件未发送"
+		);
+	});
+
+	it("does not send moderation on edits", async () => {
+		mocks.config.OPENAI_IMAGE_MODERATION = "low";
+		mocks.downloadFile.mockResolvedValue({
+			type: "base64",
+			value: PNG_B64,
+			mime: "image/png",
+			name: "x",
+		});
+		mocks.fetch.mockResolvedValue(okResponse({ data: [{ b64_json: PNG_B64 }] }));
+		await collect(
+			ctx({ files: [{ type: "hash", value: "sha-a", mime: "image/png", name: "a.png" }] })
+		);
+		expect((mocks.fetch.mock.calls[0][1].body as FormData).get("moderation")).toBeNull();
+	});
+
+	it("shows the cause of a network failure instead of just 'fetch failed'", async () => {
+		mocks.fetch.mockRejectedValue(
+			new TypeError("fetch failed", {
+				cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+			})
+		);
+		const updates = await collect(ctx({}));
+		expect((updates[0] as { text: string }).text).toContain("ECONNREFUSED");
+	});
+
+	it("reports a missing attachment readably", async () => {
+		mocks.downloadFile.mockRejectedValue({ status: 404, body: { message: "File not found" } });
+		const updates = await collect(
+			ctx({ files: [{ type: "hash", value: "sha-gone", mime: "image/png", name: "a.png" }] })
+		);
+		expect((updates[0] as { text: string }).text).toBe("生图失败：404 File not found");
+	});
+
 	it("turns an API error into a readable answer without storing anything", async () => {
 		mocks.fetch.mockResolvedValue({
 			ok: false,
