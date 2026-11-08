@@ -315,8 +315,10 @@
 					})),
 					timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
 					streamingMode,
-					// One-shot "new image" toggle; a retry reuses what the user message stored
-					imageFresh: prompt !== undefined && get(imageFreshNext),
+					// One-shot "new image" toggle, for new messages only. A retry, and an edit of a sent
+					// message, keep what that message stored (the server copies it to the edited sibling),
+					// so the composer toggle neither changes nor gets used up by them.
+					imageFresh: prompt !== undefined && !isRetry && get(imageFreshNext),
 				},
 				messageUpdatesAbortController.signal
 			).catch((err) => {
@@ -325,7 +327,7 @@
 					error.set(err.message);
 				}
 			});
-			if (prompt !== undefined) imageFreshNext.set(false);
+			if (prompt !== undefined && !isRetry) imageFreshNext.set(false);
 			if (messageUpdatesIterator === undefined) return;
 
 			// Clear only attachments this send actually consumed: a direct fix

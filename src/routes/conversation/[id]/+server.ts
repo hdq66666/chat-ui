@@ -330,7 +330,8 @@ export async function POST({ request, locals, params, getClientAddress }) {
 					from: "user",
 					content: newPrompt,
 					files: uploadedFiles,
-					...(imageFresh ? { imageFresh: true } : {}),
+					// an edited message keeps its "new image" choice
+					...(imageFresh || messageToRetry.imageFresh ? { imageFresh: true } : {}),
 					createdAt: new Date(),
 					updatedAt: new Date(),
 				},
